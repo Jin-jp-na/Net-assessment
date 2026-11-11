@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any, Dict, List
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib import colors
@@ -33,6 +33,7 @@ def build_pdf_report(
     exposure: str,
     parsed: Dict[str, Any],
     attack_graph: Dict[str, Any] | None = None,
+    findings: List[Dict[str, Any]] | None = None,
 ) -> bytes:
     """
     Returns PDF bytes.
@@ -59,11 +60,11 @@ def build_pdf_report(
     story = []
 
     # Title
-    story.append(Paragraph("PCVP Security Scan Report", h1))
+    story.append(Paragraph("RiskLens Security Assessment Report", h1))
     story.append(Spacer(1, 0.3 * cm))
     story.append(Paragraph(f"<b>Scan ID:</b> {scan_id}", body))
     story.append(Paragraph(f"<b>Exposure:</b> {exposure}", body))
-    story.append(Paragraph(f"<b>Generated:</b> {datetime.utcnow().isoformat()}Z", body))
+    story.append(Paragraph(f"<b>Generated:</b> {datetime.now(timezone.utc).isoformat()}", body))
     story.append(Spacer(1, 0.6 * cm))
 
     # Flatten services
@@ -154,7 +155,7 @@ def build_pdf_report(
     services_flat.sort(key=lambda s: (s.get("pcvp_score") or 0), reverse=True)
 
     data = [
-        ["Host", "Port/Proto", "Service", "Product", "PCVP", "Weak Creds", "Top CVEs"]
+        ["Host", "Port/Proto", "Service", "Product", "RiskLens", "Weak Creds", "Top CVEs"]
     ]
     for s in services_flat[:50]:
         wc = s.get("weak_creds") or {}
@@ -200,6 +201,26 @@ def build_pdf_report(
         )
     )
     story.append(table)
+    if findings:
+        story.append(Spacer(1, 0.7 * cm))
+        story.append(Paragraph("Evidence-Based Findings", h2))
+        finding_data = [["Severity", "Finding", "Asset", "Source"]]
+        for finding in findings[:40]:
+            finding_data.append([
+                _safe(finding.get("severity")),
+                _safe(finding.get("title")),
+                _safe(finding.get("asset")),
+                _safe(finding.get("source")),
+            ])
+        findings_table = Table(finding_data, repeatRows=1, colWidths=[2.2 * cm, 7 * cm, 4 * cm, 3 * cm])
+        findings_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
+            ("FONT", (0, 0), (-1, -1), "Helvetica", 8),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story.append(findings_table)
 
     doc.build(story, onFirstPage=_page_footer, onLaterPages=_page_footer)
     return buf.getvalue()

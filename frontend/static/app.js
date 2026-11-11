@@ -137,6 +137,8 @@ if (cachedGraph) {
         }
 
        if (!hasCachedServices) loadScanResults(currentScanId);
+       loadAliveHosts(currentScanId);
+       loadWebAssessment(currentScanId);
        if (!hasCachedGobuster) loadGobusterResults(currentScanId);
        if (!hasCachedGraph) loadAttackGraph(currentScanId);
 
@@ -187,6 +189,29 @@ if (cachedGraph) {
   });
 
   const clearBtn = document.getElementById("clear-scans-btn");
+  await loadScanHistory();
+  const refreshHistoryBtn = document.getElementById("refresh-history-btn");
+  if (refreshHistoryBtn) refreshHistoryBtn.addEventListener("click", loadScanHistory);
+  const scanHistoryBtn = document.getElementById("scan-history-btn");
+  if (scanHistoryBtn) {
+    scanHistoryBtn.addEventListener("click", () => {
+      showTab("tab-history");
+      loadScanHistory();
+    });
+  }
+  const historyBody = document.querySelector("#history-table tbody");
+  if (historyBody) {
+    historyBody.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-history-scan-id]");
+      if (button) restoreHistoricalScan(button.dataset.historyScanId);
+    });
+  }
+  const findingsDownload = document.getElementById("download-findings-btn");
+  if (findingsDownload) {
+    findingsDownload.addEventListener("click", () => {
+      if (currentScanId) window.location.href = `/scan/${currentScanId}/findings.csv`;
+    });
+  }
   if (clearBtn) {
     clearBtn.addEventListener("click", async () => {
       if (!confirm("Clear persisted scan metadata from the server and local cache?")) return;
@@ -197,6 +222,7 @@ if (cachedGraph) {
           alert(`Failed to clear persisted scans: ${data.detail || resp.status}`);
           return;
         }
+
         localStorage.removeItem("pcvp:lastScanId");
         localStorage.removeItem("pcvp:lastServicesHtml");
         localStorage.removeItem("pcvp:lastStats");
@@ -211,6 +237,7 @@ if (cachedGraph) {
         setTableLoadingStates();
         updateHeaderScanInfo();
         document.getElementById("scan-status").textContent = "Cleared persisted scans.";
+        await loadScanHistory();
       } catch (err) {
         console.error(err);
         alert("Error clearing persisted scans (see console)");
@@ -235,6 +262,7 @@ if (cachedGraph) {
     }
     const target = document.getElementById("target").value.trim();
     const exposure = document.getElementById("exposure").value;
+    const profile = document.getElementById("profile").value;
 
     if (!target) {
       statusDiv.textContent = "Please enter a target.";
@@ -259,7 +287,7 @@ if (cachedGraph) {
       const resp = await fetch("/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target, exposure }),
+        body: JSON.stringify({ target, exposure, profile }),
       });
 
       if (!resp.ok) {
@@ -277,6 +305,7 @@ if (cachedGraph) {
       updateHeaderScanInfo();
       statusDiv.textContent = `Scan started (ID: ${currentScanId}). Waiting for completion...`;
       pollScanStatus(currentScanId);
+      await loadScanHistory();
     } catch (err) {
       console.error(err);
       statusDiv.textContent = "Error starting scan (check console/logs).";
@@ -290,6 +319,110 @@ function resetOverview() {
   document.getElementById("stat-services").textContent = "0";
   document.getElementById("stat-critical").textContent = "0 / 0";
   document.getElementById("stat-weak-creds").textContent = "0";
+  const findingsSummary = document.getElementById("finding-summary");
+  const findingsBody = document.querySelector("#findings-table tbody");
+  if (findingsSummary) findingsSummary.textContent = "";
+  if (findingsBody) findingsBody.innerHTML = `<tr><td colspan="5">Waiting for scan to complete...</td></tr>`;
+}
+
+async function loadScanHistory() {
+  const body = document.querySelector("#history-table tbody");
+  if (!body) return;
+  try {
+    const response = await fetch("/scans/history");
+    if (!response.ok) throw new Error(`History request failed: ${response.status}`);
+    const scans = await response.json();
+    if (!scans.length) {
+      body.innerHTML = `<tr><td colspan="6" class="px-3 py-2">No scans recorded yet.</td></tr>`;
+      return;
+    }
+    body.innerHTML = scans.map((scan) => `
+      <tr>
+        <td class="px-3 py-2">${escapeHtml(formatHistoryDate(scan.created_at))}</td>
+        <td class="px-3 py-2 font-medium">${escapeHtml(scan.target || "")}</td>
+        <td class="px-3 py-2">${escapeHtml(scan.profile || "standard")}</td>
+        <td class="px-3 py-2">${escapeHtml(scan.exposure_effective || scan.exposure || "auto")}</td>
+        <td class="px-3 py-2">${escapeHtml(scan.status || "unknown")}</td>
+        <td class="px-3 py-2"><button type="button" data-history-scan-id="${escapeHtml(scan.scan_id)}" class="btn-link">View results</button></td>
+      </tr>
+    `).join("");
+  } catch (error) {
+    console.error("[HISTORY] Failed to load scan history:", error);
+    body.innerHTML = `<tr><td colspan="6" class="px-3 py-2">Unable to load scan history.</td></tr>`;
+  }
+}
+
+async function loadFindings(scanId) {
+  const body = document.querySelector("#findings-table tbody");
+  const summary = document.getElementById("finding-summary");
+  body.innerHTML = `<tr><td colspan="5">Loading findings...</td></tr>`;
+  const resp = await fetch(`/scan/${scanId}/findings`);
+  if (!resp.ok) {
+    body.innerHTML = `<tr><td colspan="5">Findings are not available yet.</td></tr>`;
+    return;
+  }
+  const data = await resp.json();
+  const counts = data.summary || {};
+  summary.textContent = `Critical: ${counts.critical || 0} · High: ${counts.high || 0} · Medium: ${counts.medium || 0} · Low: ${counts.low || 0}`;
+  const findings = data.findings || [];
+  if (!findings.length) {
+    body.innerHTML = `<tr><td colspan="5">No findings were generated.</td></tr>`;
+    return;
+  }
+  body.innerHTML = "";
+  for (const finding of findings) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="px-3 py-2"><span class="badge badge-${escapeHtml(finding.severity || "info")}">${escapeHtml(finding.severity || "info")}</span></td>
+      <td class="px-3 py-2">${escapeHtml(finding.title || "")}</td>
+      <td class="px-3 py-2">${escapeHtml(finding.asset || "")}</td>
+      <td class="px-3 py-2 max-w-xl">${escapeHtml(finding.evidence || "")}</td>
+      <td class="px-3 py-2">${escapeHtml(finding.source || "")}</td>
+    `;
+    body.appendChild(tr);
+  }
+}
+
+function formatHistoryDate(value) {
+  if (!value) return "Unknown";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+async function restoreHistoricalScan(scanId) {
+  if (!scanId) return;
+  if (statusIntervalId !== null) {
+    clearInterval(statusIntervalId);
+    statusIntervalId = null;
+  }
+  const response = await fetch(`/scan/${encodeURIComponent(scanId)}`);
+  if (!response.ok) {
+    alert("This scan is no longer available.");
+    await loadScanHistory();
+    return;
+  }
+  const scan = await response.json();
+  currentScanId = scan.scan_id;
+  currentExposure = scan.exposure || scan.exposure_effective || "auto";
+  localStorage.setItem("pcvp:lastScanId", currentScanId);
+  updateHeaderScanInfo();
+  document.getElementById("scan-status").textContent = `Viewing scan ${scan.scan_id}`;
+  document.getElementById("profile").value = scan.profile || "standard";
+  resetOverview();
+  setTableLoadingStates();
+  if (scan.status === "completed") {
+    await Promise.all([
+      loadScanResults(scan.scan_id),
+      loadFindings(scan.scan_id),
+      loadAliveHosts(scan.scan_id),
+      loadGobusterResults(scan.scan_id),
+      loadWebAssessment(scan.scan_id),
+      loadAttackGraph(scan.scan_id),
+    ]);
+    document.getElementById("download-report-btn").disabled = false;
+  } else {
+    pollScanStatus(scan.scan_id);
+  }
 }
 
 function setTableLoadingStates() {
@@ -297,7 +430,7 @@ function setTableLoadingStates() {
   const gobBody = document.querySelector("#gobuster-table tbody");
   const agDiv = document.getElementById("attack-graph-content");
   const agNet = document.getElementById("attack-graph-network");
-  servicesBody.innerHTML = `<tr><td colspan="8">Waiting for scan to complete...</td></tr>`;
+  servicesBody.innerHTML = `<tr><td colspan="9">Waiting for scan to complete...</td></tr>`;
   gobBody.innerHTML = `<tr><td colspan="3">Waiting for scan to complete...</td></tr>`;
   agDiv.textContent = "Waiting for scan to complete...";
   agNet.innerHTML = "";
@@ -356,8 +489,20 @@ function pollScanStatus(scanId) {
               console.error("[LOADING] loadScanResults failed:", e);
               throw e;
             }),
+            loadFindings(scanId).catch(e => {
+              console.error("[LOADING] loadFindings failed:", e);
+              throw e;
+            }),
+            loadAliveHosts(scanId).catch(e => {
+              console.error("[LOADING] loadAliveHosts failed:", e);
+              throw e;
+            }),
             loadGobusterResults(scanId).catch(e => {
               console.error("[LOADING] loadGobusterResults failed:", e);
+              throw e;
+            }),
+            loadWebAssessment(scanId).catch(e => {
+              console.error("[LOADING] loadWebAssessment failed:", e);
               throw e;
             }),
             loadAttackGraph(scanId).catch(e => {
@@ -366,6 +511,7 @@ function pollScanStatus(scanId) {
             }),
           ]);
           statusDiv.textContent = `Scan fully completed (Nmap + Gobuster).`;
+          await loadScanHistory();
         } catch (loadErr) {
           console.error("[LOADING] Error loading results:", loadErr);
           statusDiv.textContent = `Scan completed but error loading results. Check console.`;
@@ -411,7 +557,7 @@ function pollScanStatus(scanId) {
 
 async function loadScanResults(scanId) {
   const servicesBody = document.querySelector("#services-table tbody");
-  servicesBody.innerHTML = `<tr><td colspan="8">Loading NVD/PCVP data...</td></tr>`;
+  servicesBody.innerHTML = `<tr><td colspan="9">Loading NVD/RiskLens data...</td></tr>`;
   currentServices = [];
 
   try {
@@ -421,7 +567,7 @@ async function loadScanResults(scanId) {
     if (!resp.ok) {
       const errorText = await resp.text().catch(() => "Unknown error");
       console.error("[loadScanResults] Server error:", resp.status, errorText);
-      servicesBody.innerHTML = `<tr><td colspan="8">Server error: ${resp.status}</td></tr>`;
+      servicesBody.innerHTML = `<tr><td colspan="9">Server error: ${resp.status}</td></tr>`;
       return;
     }
 
@@ -461,7 +607,7 @@ localStorage.setItem("pcvp:lastStats", JSON.stringify({
 localStorage.setItem("pcvp:lastServices", JSON.stringify(currentServices));
 
 if (!rows.length) {
-  servicesBody.innerHTML = `<tr><td colspan="8">No services detected for this scan.</td></tr>`;
+  servicesBody.innerHTML = `<tr><td colspan="9">No services detected for this scan.</td></tr>`;
   return;
 }
 
@@ -478,6 +624,7 @@ for (const svc of rows) {
     ? `${svc.weak_creds.protocol || ""} ${svc.weak_creds.username}:${svc.weak_creds.password}`
     : "None";
   const weakPillClass = svc.weak_creds && svc.weak_creds.found ? "pill pill-weak" : "pill";
+  const nseCount = Array.isArray(svc.nse_findings) ? svc.nse_findings.length : 0;
   tr.innerHTML = `
     <td>${svc.ip || ""}</td>
     <td>${svc.port}</td>
@@ -486,6 +633,7 @@ for (const svc of rows) {
     <td><span class="badge ${badgeClass}">${level}</span></td>
     <td>${svc.pcvp_score ?? ""}</td>
     <td><span class="${weakPillClass}">${weakCredsText}</span></td>
+    <td>${nseCount ? `<span class="pill pill-weak">${nseCount} finding(s)</span>` : "None"}</td>
     <td><button class="btn-link" data-ip="${svc.ip}" data-port="${svc.port}" data-proto="${svc.protocol}">Details</button></td>
   `;
   servicesBody.appendChild(tr);
@@ -499,9 +647,85 @@ localStorage.setItem("pcvp:lastServicesHtml", servicesBody.innerHTML);
 } catch (err) {
   console.error("[loadScanResults] CATCH ERROR:", err.name, err.message);
   console.error("[loadScanResults] Full error:", err);
-  servicesBody.innerHTML = `<tr><td colspan="8">Error loading NVD/PCVP data: ${err.message}</td></tr>`;
+  servicesBody.innerHTML = `<tr><td colspan="9">Error loading NVD/RiskLens data: ${err.message}</td></tr>`;
 }
 }
+
+async function loadAliveHosts(scanId) {
+  const body = document.querySelector("#alive-hosts-table tbody");
+  body.innerHTML = `<tr><td colspan="6">Loading alive hosts...</td></tr>`;
+
+  try {
+    const resp = await fetch(`/scan/${scanId}/alive-hosts`);
+    if (!resp.ok) {
+      body.innerHTML = `<tr><td colspan="6">Alive hosts are not available yet.</td></tr>`;
+      return;
+    }
+
+    const data = await resp.json();
+    const hosts = data.hosts || [];
+    if (!hosts.length) {
+      body.innerHTML = `<tr><td colspan="6">No alive hosts detected.</td></tr>`;
+      return;
+    }
+
+    body.innerHTML = "";
+    for (const host of hosts) {
+      const tr = document.createElement("tr");
+      const os = Array.isArray(host.os) && host.os.length
+        ? host.os.map(item => `${item.name || ""} (${item.accuracy || "?"}%)`).join(", ")
+        : "Unknown";
+      tr.innerHTML = `
+        <td class="px-3 py-2">${escapeHtml(host.ip || "")}</td>
+        <td class="px-3 py-2">${escapeHtml((host.hostnames || []).join(", ") || "—")}</td>
+        <td class="px-3 py-2">${escapeHtml([host.mac, host.mac_vendor].filter(Boolean).join(" / ") || "—")}</td>
+        <td class="px-3 py-2">${escapeHtml(os)}</td>
+        <td class="px-3 py-2">${host.services ?? "—"}</td>
+        <td class="px-3 py-2">${escapeHtml((host.ports || []).join(", ") || "—")}</td>
+      `;
+      body.appendChild(tr);
+    }
+  } catch (err) {
+    console.error("[loadAliveHosts] Error:", err);
+    body.innerHTML = `<tr><td colspan="6">Error loading alive hosts.</td></tr>`;
+  }
+}
+
+async function loadWebAssessment(scanId) {
+  const container = document.getElementById("web-assessment");
+  if (!container) return;
+  container.textContent = "Loading HTTP/TLS assessment...";
+  try {
+    const resp = await fetch(`/webscan/${scanId}/assessment`);
+    if (!resp.ok) {
+      container.textContent = "Web assessment is not available for this scan.";
+      return;
+    }
+    const data = await resp.json();
+    const checks = data.checks || [];
+    const technologies = data.technologies || [];
+    const tls = data.tls || {};
+    const checkRows = checks.length
+      ? checks.map(check => `<li><strong>${escapeHtml(check.name)}</strong>: ${escapeHtml(check.status)} — ${escapeHtml(check.detail)}</li>`).join("")
+      : "<li>No HTTP checks returned.</li>";
+    const technologyText = technologies.length
+      ? technologies.map(item => `${item.name}: ${item.evidence}`).join(", ")
+      : "No technology signatures detected";
+    container.innerHTML = `
+      <div><strong>Final URL:</strong> ${escapeHtml(data.http?.final_url || data.url || "")}</div>
+      <div><strong>HTTP status:</strong> ${escapeHtml(data.http?.status ?? "Unavailable")}</div>
+      <div><strong>Technologies:</strong> ${escapeHtml(technologyText)}</div>
+      <div><strong>TLS:</strong> ${escapeHtml(tls.protocol || "Not HTTPS")} ${tls.cipher ? `(${escapeHtml(tls.cipher)})` : ""}</div>
+      <div class="section-title">Security checks</div>
+      <ul>${checkRows}</ul>
+      ${data.error ? `<div style="color:#fca5a5;">${escapeHtml(data.error)}</div>` : ""}
+    `;
+  } catch (err) {
+    console.error("[loadWebAssessment] Error:", err);
+    container.textContent = "Error loading web assessment.";
+  }
+}
+
 async function loadGobusterResults(scanId) {
   const gobBody = document.querySelector("#gobuster-table tbody");
   gobBody.innerHTML = `<tr><td colspan="3">Loading Gobuster results...</td></tr>`;
@@ -516,18 +740,33 @@ async function loadGobusterResults(scanId) {
     const data = await resp.json();
     const results = data.results || [];
     const error = data.error || null;
+    const errorDetail = data.error_detail || null;
 
     if (error && !results.length) {
-      gobBody.innerHTML = `<tr><td colspan="3">Gobuster failed: ${escapeHtml(error)}</td></tr>`;
+      gobBody.innerHTML = `
+        <tr><td colspan="3">
+          <div style="color:#fbbf24;">${escapeHtml(error)}</div>
+          ${errorDetail ? `<details style="margin-top:6px;"><summary>Technical details</summary><pre style="white-space:pre-wrap; margin-top:4px;">${escapeHtml(errorDetail)}</pre></details>` : ""}
+        </td></tr>`;
       return;
     }
 
     if (!results.length) {
-      gobBody.innerHTML = `<tr><td colspan="3">No directories found.</td></tr>`;
+      gobBody.innerHTML = `
+        <tr><td colspan="3">
+          <div>No directories found.</div>
+          ${error ? `<div style="color:#fbbf24; margin-top:4px;">${escapeHtml(error)}</div>` : ""}
+          ${errorDetail ? `<details style="margin-top:6px;"><summary>Technical details</summary><pre style="white-space:pre-wrap; margin-top:4px;">${escapeHtml(errorDetail)}</pre></details>` : ""}
+        </td></tr>`;
       return;
     }
 
     gobBody.innerHTML = "";
+    if (error) {
+      const notice = document.createElement("tr");
+      notice.innerHTML = `<td colspan="3" style="color:#fbbf24;">${escapeHtml(error)} <details style="display:inline;"><summary style="display:inline; cursor:pointer;">details</summary><pre style="white-space:pre-wrap; margin-top:4px;">${escapeHtml(errorDetail || "")}</pre></details></td>`;
+      gobBody.appendChild(notice);
+    }
     for (const r of results) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
@@ -639,7 +878,7 @@ if (!chains.length) {
   for (const ch of chains) {
     html += "<li style='margin-bottom:6px;'>";
     html += `<strong>${ch.service}</strong> on <strong>${ch.hostIp}:${ch.port}</strong> `;
-    html += `(PCVP: ${ch.level.toUpperCase()} score ${ch.score})`;
+    html += `(RiskLens: ${ch.level.toUpperCase()} score ${ch.score})`;
     if (ch.cves.length) { html += "<br><span style='color:#9ca3af;'>Exploitable via:</span> " + ch.cves.map((id) => `<code>${id}</code>`).join(", "); }
     if (ch.nextServices.length) { html += "<br><span style='color:#9ca3af;'>Potential pivot to:</span> " + ch.nextServices.join(", "); }
     html += "</li>";
@@ -722,7 +961,7 @@ function onDetailsClick(e) {
   let html = "";
   html += `<div><strong>Product:</strong> ${escapeHtml(svc.product || "")} ${escapeHtml(svc.version || "")}</div>`;
   html += `<div><strong>Exposure:</strong> ${escapeHtml(currentExposure || "auto")}</div>`;
-  html += `<div><strong>PCVP:</strong> ${escapeHtml(svc.pcvp_level || "")} (score ${svc.pcvp_score ?? ""})</div>`;
+  html += `<div><strong>RiskLens:</strong> ${escapeHtml(svc.pcvp_level || "")} (score ${svc.pcvp_score ?? ""})</div>`;
   if (svc.weak_creds && svc.weak_creds.found) {
     html += `<div style="margin-top:4px;"><strong>Weak Credentials:</strong> ${escapeHtml(`${svc.weak_creds.protocol || ""} ${svc.weak_creds.username}:${svc.weak_creds.password}`)}</div>`;
   }
@@ -740,6 +979,17 @@ function onDetailsClick(e) {
     }
     html += "</ul>";
   } else { html += "<div>No CVEs mapped for this service.</div>"; }
+  const nseFindings = Array.isArray(svc.nse_findings) ? svc.nse_findings : [];
+  html += `<div class="section-title">Nmap NSE vulnerability evidence</div>`;
+  if (nseFindings.length) {
+    html += "<ul>";
+    for (const finding of nseFindings) {
+      html += `<li><strong>${escapeHtml(finding.id || "NSE script")}</strong><pre style="white-space:pre-wrap; margin-top:4px;">${escapeHtml(finding.output || "")}</pre></li>`;
+    }
+    html += "</ul>";
+  } else {
+    html += "<div>No NSE vulnerability evidence reported for this service.</div>";
+  }
   html += `<div class="section-title">Remediation</div>`;
   html += `<div id="llm-remediation" style="margin-top:6px; color:#9ca3af;">Not generated yet.</div>`;
   body.innerHTML = html;

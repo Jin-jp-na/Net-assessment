@@ -1,5 +1,6 @@
 import csv
 import logging
+from contextlib import asynccontextmanager
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 logging.getLogger("paramiko.transport").setLevel(logging.CRITICAL)
 from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
@@ -11,20 +12,25 @@ import subprocess
 import xmltodict
 import ipaddress
 import json
+import socket
+import ssl
+import requests
+from urllib.parse import urlparse
 from pathlib import Path
 from backend.scanner.nvd_mapping import enrich_service_with_nvd
 from pydantic import BaseModel
 from backend.scanner.pcvp_scoring import pcvp_score_for_service
 from backend.scanner.attack_graph import build_attack_graph
 from backend.scanner.weak_creds import annotate_services_with_weak_creds
-from typing import Any, Dict
 from backend.llm_remediation import generate_remediation_openai
-from fastapi.responses import StreamingResponse
+from starlette.responses import StreamingResponse, Response
 from backend.report_generator import build_pdf_report
 from io import BytesIO
+import io
 import re
 from typing import Tuple
 import time 
+from datetime import datetime, timezone
 
 
 def infer_exposure_from_target(target: str) -> str:
@@ -74,24 +80,13 @@ def parse_target_and_port(raw: str) -> Tuple[str, Optional[str], Optional[str]]:
 
     return hostport.strip(), None, scheme
 
-# ✅ Added gobuster_*.done to clear list
-def _clear_scan_files() -> None:
-    for pattern in ("*.xml", "gobuster_*.txt", "gobuster_*.status", "gobuster_*.done", "scan_status.json"):
-        for p in SCANS_DIR.glob(pattern):
-            try:
-                p.unlink()
-            except Exception:
-                pass
-
 GOBUSTER_EXE = BASE_DIR.parent / "gobuster_Windows_x86_64" / "gobuster.exe"
 GOBUSTER_WORDLIST = BASE_DIR.parent / "wordlists" / "common.txt"
-
-app = FastAPI(title="PCVP - Privilege Contextual Vulnerability Prioritizer")
+NMAP_SCRIPT_SET = "vuln"
 
 BOOT_ID = str(uuid4())
 
 templates = Jinja2Templates(directory=str(BASE_DIR.parent / "frontend" / "templates"))
-app.mount("/static", StaticFiles(directory=str(BASE_DIR.parent / "frontend" / "static")), name="static")
 
 
 class ScanRequest(BaseModel):
@@ -99,6 +94,7 @@ class ScanRequest(BaseModel):
     description: Optional[str] = None
     exposure: Optional[str] = "auto"
     ports: Optional[str] = None
+    profile: str = "standard"
 
 class ScanStatus(BaseModel):
     scan_id: str
@@ -108,6 +104,10 @@ class ScanStatus(BaseModel):
     exposure: Optional[str] = "auto"
     exposure_effective: Optional[str] = None
     gobuster_status: Optional[str] = "pending"  # ✅ track gobuster separately
+    profile: str = "standard"
+    description: Optional[str] = None
+    created_at: str = ""
+    completed_at: Optional[str] = None
 
 
 class WebScanRequest(BaseModel):
@@ -129,9 +129,27 @@ class RemediationRequest(BaseModel):
 
 scan_status_store: dict[str, ScanStatus] = {}
 
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_scan_status_store() -> None:
+    if not SCAN_STATUS_FILE.exists():
+        return
+    try:
+        data = json.loads(SCAN_STATUS_FILE.read_text(encoding="utf-8"))
+        for scan_id, raw_status in data.items():
+            status = ScanStatus.model_validate(raw_status)
+            if not status.created_at:
+                status.created_at = _utc_now()
+            scan_status_store[scan_id] = status
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"[SCAN STORE] Failed to load scan status store: {exc}")
+
 def _save_scan_status_store() -> None:
     try:
-        data = {k: v.dict() for k, v in scan_status_store.items()}
+        data = {k: v.model_dump() for k, v in scan_status_store.items()}
         tmp = SCAN_STATUS_FILE.with_suffix(".tmp")
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -227,7 +245,7 @@ def run_nmap_scan_multi(scan_id: str, targets: List[str], ports: Optional[str] =
         except Exception:
             pass
 
-        cmd = [NMAP_PATH, "-sV", "-T4"]
+        cmd = [NMAP_PATH, "-sV", "-O", "--osscan-guess", "-T4", "-Pn", "--script", NMAP_SCRIPT_SET]
 
         if ports:
             cmd += ["-p", ports]
@@ -236,7 +254,13 @@ def run_nmap_scan_multi(scan_id: str, targets: List[str], ports: Optional[str] =
         cmd += ["-oX", str(tmp_file)]
         cmd += list(targets)
 
-        subprocess.run(cmd, check=True, capture_output=True)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            # OS detection may require an elevated Nmap installation. Preserve
+            # the service/vulnerability scan if Windows blocks raw probes.
+            fallback = [arg for arg in cmd if arg not in ("-O", "--osscan-guess")]
+            subprocess.run(fallback, check=True, capture_output=True)
 
         # ✅ Atomic replace: endpoints will only see a complete XML
         if not tmp_file.exists() or tmp_file.stat().st_size < 100:
@@ -272,7 +296,11 @@ def run_nmap_scan_multi(scan_id: str, targets: List[str], ports: Optional[str] =
             pass
 
 
-def run_cidr_scan(scan_id: str, subnet: str, ports: Optional[str]) -> None:
+def run_cidr_scan(
+    scan_id: str,
+    subnet: str,
+    ports: Optional[str],
+) -> None:
     """
     1) Angry IP discovery -> alive hosts
     2) Run ONE combined Nmap scan against alive hosts
@@ -336,38 +364,128 @@ def _normalize_webscan_error(err: str) -> str:
         return "Web scan connection refused (no web server on that port or firewall rejected)."
     if "no such host" in low or "lookup" in low:
         return "Web scan failed (DNS/host resolution error)."
-    if "tls" in low or "ssl" in low or "https" in low:
+    if "tls" in low or "ssl" in low or "certificate" in low or "x509" in low:
         return "Web scan failed due to TLS/SSL issue (try https://target:port if applicable)."
     if "403" in low or "forbidden" in low:
         return "Web scan appears blocked (403 Forbidden)."
+    if "wildcard" in low or "similar response" in low:
+        return "The target returns the same response for unknown paths; Gobuster cannot reliably distinguish real paths."
 
-    return "Web scan failed or was blocked by the target."
+    return f"Web scan could not complete: {e[:500]}"
 
 
-def _load_scan_status_store() -> None:
-    if not SCAN_STATUS_FILE.exists():
-        return
+def run_web_security_assessment(url: str) -> dict:
+    parsed_url = urlparse(url)
+    if parsed_url.scheme not in ("http", "https") or not parsed_url.hostname:
+        return {"url": url, "error": "Unsupported web URL."}
+
+    result = {
+        "url": url,
+        "http": {},
+        "tls": {},
+        "technologies": [],
+        "checks": [],
+    }
+
+    response = None
+    request_error = None
     try:
-        with SCAN_STATUS_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        for k, v in data.items():
-            try:
-                scan_status_store[k] = ScanStatus(**v)
-            except Exception:
-                continue
-    except Exception as e:
-        print(f"[SCAN STORE] Failed to load scan status store: {e}")
+        response = requests.get(url, timeout=15, allow_redirects=True, verify=True)
+    except requests.exceptions.SSLError as exc:
+        request_error = str(exc)
+        try:
+            response = requests.get(url, timeout=15, allow_redirects=True, verify=False)
+        except requests.RequestException as fallback_exc:
+            request_error = str(fallback_exc)
+    except requests.RequestException as exc:
+        request_error = str(exc)
+
+    if response is not None:
+        headers = {key.lower(): value for key, value in response.headers.items()}
+        result["http"] = {
+            "status": response.status_code,
+            "final_url": response.url,
+            "headers": dict(response.headers),
+        }
+        body_sample = response.text[:200000].lower()
+        technology_signatures = {
+            "Server": headers.get("server"),
+            "Powered-By": headers.get("x-powered-by"),
+            "WordPress": "wp-content" if "wp-content" in body_sample else None,
+            "React": "react" if "react" in body_sample else None,
+            "jQuery": "jquery" if "jquery" in body_sample else None,
+        }
+        result["technologies"] = [
+            {"name": name, "evidence": evidence}
+            for name, evidence in technology_signatures.items()
+            if evidence
+        ]
+        security_headers = {
+            "strict-transport-security": "HSTS",
+            "content-security-policy": "Content-Security-Policy",
+            "x-content-type-options": "X-Content-Type-Options",
+            "x-frame-options": "X-Frame-Options",
+            "referrer-policy": "Referrer-Policy",
+            "permissions-policy": "Permissions-Policy",
+        }
+        for header_name, label in security_headers.items():
+            present = header_name in headers
+            result["checks"].append({
+                "name": label,
+                "status": "pass" if present else "missing",
+                "detail": "Header present" if present else "Security header is missing",
+            })
+        if "server" in headers:
+            result["checks"].append({
+                "name": "Server disclosure",
+                "status": "review",
+                "detail": f"Server header is exposed: {headers['server']}",
+            })
+        if request_error:
+            result["checks"].append({
+                "name": "TLS validation",
+                "status": "review",
+                "detail": request_error,
+            })
+    else:
+        result["error"] = request_error or "HTTP request failed."
+
+    if parsed_url.scheme == "https" and parsed_url.hostname:
+        try:
+            port = parsed_url.port or 443
+            context = ssl._create_unverified_context()
+            with socket.create_connection((parsed_url.hostname, port), timeout=10) as raw_socket:
+                with context.wrap_socket(raw_socket, server_hostname=parsed_url.hostname) as tls_socket:
+                    certificate = tls_socket.getpeercert() or {}
+                    cipher = tls_socket.cipher()
+                    result["tls"] = {
+                        "protocol": tls_socket.version(),
+                        "cipher": cipher[0] if cipher else None,
+                        "subject": str(certificate.get("subject", "")),
+                        "issuer": str(certificate.get("issuer", "")),
+                        "expires": certificate.get("notAfter"),
+                    }
+        except (OSError, ssl.SSLError) as exc:
+            result["tls"] = {"error": str(exc)}
+
+    return result
 
 
-@app.on_event("startup")
-def load_in_memory_store() -> None:
-    scan_status_store.clear()
-    _clear_scan_files()
-    
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    _load_scan_status_store()
+    yield
+
+
+app = FastAPI(
+    title="RiskLens - Security Assessment Platform",
+    lifespan=lifespan,
+)
+app.mount("/static", StaticFiles(directory=str(BASE_DIR.parent / "frontend" / "static")), name="static")
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "pcvp-backend", "boot_id": BOOT_ID}
+    return {"status": "ok", "service": "risklens-backend", "boot_id": BOOT_ID}
 
 
 @app.post("/scans/clear")
@@ -380,6 +498,15 @@ def clear_persisted_scans():
         return {"status": "ok", "message": "Persisted scan metadata cleared (raw files preserved)"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear scan metadata: {e}")
+
+
+@app.get("/scans/history", response_model=list[ScanStatus])
+def get_scan_history():
+    return sorted(
+        scan_status_store.values(),
+        key=lambda item: item.created_at or "",
+        reverse=True,
+    )
 
 
 @app.get("/", include_in_schema=False)
@@ -398,18 +525,28 @@ def run_nmap_scan(scan_id: str, target: str, ports: Optional[str] = None):
     output_file = SCANS_DIR / f"{scan_id}.xml"
 
     try:
+        profile = status.profile
         cmd = [
             NMAP_PATH,
             "-sV",
             "-T4",
+            "-Pn",
         ]
+        if profile in {"vulnerability", "full"}:
+            cmd += ["-O", "--osscan-guess", "--script", NMAP_SCRIPT_SET]
+        elif profile == "quick":
+            cmd = [NMAP_PATH, "-T4", "-Pn"]
 
         if ports:
             cmd += ["-p", ports]  # ✅ only scan specified ports
 
         cmd += ["-oX", str(output_file), target]
 
-        subprocess.run(cmd, check=True, capture_output=True)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            fallback = [arg for arg in cmd if arg not in ("-O", "--osscan-guess")]
+            subprocess.run(fallback, check=True, capture_output=True)
 
         status.status = "nmap_done"
         status.message = "Nmap completed. Waiting for Gobuster..."
@@ -438,12 +575,10 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
 
     # ✅ ADD THIS (CIDR subnet scan)
     if is_cidr_target(request.target):
-        scan_status_store.clear()
-        _save_scan_status_store()
-
         scan_id = str(uuid4())
         ports = (request.ports or "").strip() or None
 
+        profile = request.profile if request.profile in {"quick", "standard", "vulnerability", "web", "full"} else "standard"
         status = ScanStatus(
             scan_id=scan_id,
             target=request.target,  # keep CIDR as target label
@@ -452,6 +587,9 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
             exposure=request.exposure or "auto",
             exposure_effective="internal",
             gobuster_status="skipped",
+            profile=profile,
+            description=request.description,
+            created_at=_utc_now(),
         )
         scan_status_store[scan_id] = status
         _save_scan_status_store()
@@ -475,10 +613,8 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     else:
         exposure_effective = exposure_choice
 
-    scan_status_store.clear()
-    _save_scan_status_store()
-
     scan_id = str(uuid4())
+    profile = request.profile if request.profile in {"quick", "standard", "vulnerability", "web", "full"} else "standard"
     status = ScanStatus(
         scan_id=scan_id,
         target=host,  # ✅ store clean host (not host:port)
@@ -486,6 +622,9 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         message="Nmap + Gobuster scan scheduled",
         exposure=exposure_choice,
         exposure_effective=exposure_effective,
+        profile=profile,
+        description=request.description,
+        created_at=_utc_now(),
     )
     scan_status_store[scan_id] = status
     _save_scan_status_store()
@@ -502,7 +641,12 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         scheme = "http"
 
     target_url = f"{scheme}://{netloc}"
-    background_tasks.add_task(run_gobuster_scan, scan_id, target_url)
+    if profile in {"web", "full", "standard", "vulnerability"}:
+        background_tasks.add_task(run_gobuster_scan, scan_id, target_url)
+    else:
+        status.gobuster_status = "skipped"
+        scan_status_store[scan_id] = status
+        _save_scan_status_store()
 
     return status
 @app.get("/scan/{scan_id}", response_model=ScanStatus)
@@ -523,6 +667,8 @@ def get_scan_status(scan_id: str):
 
     if nmap_done and gobuster_done:
         status.status = "completed"
+        if not status.completed_at:
+            status.completed_at = _utc_now()
         # if gobuster was skipped, keep it skipped; otherwise mark completed
         if status.gobuster_status != "skipped":
             status.gobuster_status = "completed"
@@ -595,10 +741,41 @@ def parse_nmap_xml(xml_path: Path) -> dict:
             addresses = [addresses]
 
         ip = None
+        mac_address = None
+        mac_vendor = None
         for addr in addresses:
             if addr.get("@addrtype") in ("ipv4", "ipv6"):
                 ip = addr.get("@addr")
-                break
+            elif addr.get("@addrtype") == "mac":
+                mac_address = addr.get("@addr")
+                mac_vendor = addr.get("@vendor")
+
+        reverse_dns = None
+        if ip:
+            try:
+                reverse_dns = socket.gethostbyaddr(ip)[0]
+            except (socket.herror, socket.gaierror, OSError):
+                reverse_dns = None
+
+        hostnames_block = (host.get("hostnames") or {}).get("hostname", [])
+        if isinstance(hostnames_block, dict):
+            hostnames_block = [hostnames_block]
+        hostnames = [
+            item.get("@name")
+            for item in hostnames_block
+            if item.get("@name")
+        ]
+
+        os_matches = (host.get("os") or {}).get("osmatch", [])
+        if isinstance(os_matches, dict):
+            os_matches = [os_matches]
+        os_detection = []
+        for match in os_matches[:3]:
+            os_detection.append({
+                "name": match.get("@name"),
+                "accuracy": match.get("@accuracy"),
+                "line": match.get("@line"),
+            })
 
         ports_block = host.get("ports", {}) or {}
         raw_ports = ports_block.get("port", [])
@@ -607,8 +784,11 @@ def parse_nmap_xml(xml_path: Path) -> dict:
 
         services = []
         for p in raw_ports:
+            port_value = p.get("@portid")
+            if not isinstance(port_value, (str, int)):
+                continue
             try:
-                port_id = int(p.get("@portid"))
+                port_id = int(port_value)
             except (TypeError, ValueError):
                 continue
 
@@ -620,6 +800,18 @@ def parse_nmap_xml(xml_path: Path) -> dict:
             product = service_info.get("@product")
             version = service_info.get("@version")
             extrainfo = service_info.get("@extrainfo")
+            raw_scripts = p.get("script", [])
+            if isinstance(raw_scripts, dict):
+                raw_scripts = [raw_scripts]
+            nse_findings = []
+            for script in raw_scripts:
+                script_id = script.get("@id")
+                script_output = script.get("@output")
+                if script_id and script_output:
+                    nse_findings.append({
+                        "id": script_id,
+                        "output": script_output,
+                    })
 
             services.append(
                 {
@@ -630,10 +822,19 @@ def parse_nmap_xml(xml_path: Path) -> dict:
                     "product": product,
                     "version": version,
                     "extrainfo": extrainfo,
+                    "nse_findings": nse_findings,
                 }
             )
 
-        parsed["hosts"].append({"ip": ip, "services": services})
+        parsed["hosts"].append({
+            "ip": ip,
+            "hostnames": hostnames,
+            "reverse_dns": reverse_dns,
+            "mac": mac_address,
+            "mac_vendor": mac_vendor,
+            "os": os_detection,
+            "services": services,
+        })
 
     return parsed
 @app.get("/scan/{scan_id}/parsed")
@@ -696,12 +897,112 @@ def get_scan_with_nvd(scan_id: str):
                 svc["pcvp_score"] = pcvp["pcvp_score"]
                 svc["pcvp_level"] = pcvp["pcvp_level"]
                 svc["pcvp_reasons"] = pcvp["pcvp_reasons"]
-            except Exception as pcvp_err:
+            except Exception:
                 svc["pcvp_score"] = 0
                 svc["pcvp_level"] = "informational"
                 svc["pcvp_reasons"] = []
 
-    return {"scan_id": scan_id, "exposure": scan_status.exposure, "data": parsed}
+    return {"scan_id": scan_id, "exposure": scan_status.exposure, "profile": scan_status.profile, "data": parsed}
+
+
+def build_findings(parsed: dict, web_assessment: Optional[dict] = None) -> list[dict]:
+    findings: list[dict] = []
+    for host in parsed.get("hosts", []):
+        ip = host.get("ip") or "unknown"
+        for service in host.get("services", []):
+            location = f"{ip}:{service.get('port')}/{service.get('protocol', 'tcp')}"
+            for script in service.get("nse_findings", []):
+                findings.append({
+                    "id": f"NSE-{script.get('id', 'finding')}-{ip}-{service.get('port')}",
+                    "title": f"Nmap vulnerability check: {script.get('id')}",
+                    "severity": "high",
+                    "confidence": "high",
+                    "asset": location,
+                    "evidence": script.get("output", ""),
+                    "remediation": "Review the NSE evidence and apply the vendor-recommended fix.",
+                    "source": "Nmap NSE",
+                })
+            weak = service.get("weak_creds") or {}
+            if weak.get("found"):
+                findings.append({
+                    "id": f"WEAK-CREDS-{ip}-{service.get('port')}",
+                    "title": "Weak credentials detected",
+                    "severity": "critical",
+                    "confidence": "high",
+                    "asset": location,
+                    "evidence": f"{weak.get('protocol', 'service')} accepted supplied credentials",
+                    "remediation": "Disable default credentials and rotate the affected account.",
+                    "source": "Credential check",
+                })
+            for cve in (service.get("nvd") or {}).get("cves", [])[:5]:
+                score = cve.get("score") or 0
+                severity = str(cve.get("severity") or "medium").lower()
+                findings.append({
+                    "id": cve.get("id") or "CVE-unknown",
+                    "title": f"Known vulnerability in {service.get('product') or service.get('service') or 'service'}",
+                    "severity": severity,
+                    "confidence": "medium",
+                    "asset": location,
+                    "evidence": cve.get("description", ""),
+                    "cvss": score,
+                    "remediation": "Upgrade or patch the affected product and verify the service version.",
+                    "source": "NVD",
+                })
+    for check in (web_assessment or {}).get("checks", []):
+        if check.get("status") == "missing":
+            findings.append({
+                "id": f"WEB-{check.get('name', 'header').replace(' ', '-').upper()}",
+                "title": f"Missing web security control: {check.get('name')}",
+                "severity": "medium",
+                "confidence": "high",
+                "asset": (web_assessment or {}).get("url", "web target"),
+                "evidence": check.get("detail", ""),
+                "remediation": f"Configure the {check.get('name')} response header.",
+                "source": "HTTP assessment",
+            })
+    rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+    return sorted(findings, key=lambda item: (rank.get(item["severity"], 0), float(item.get("cvss") or 0)), reverse=True)
+
+
+def enrich_scan_data(scan_id: str) -> tuple[dict, Optional[dict]]:
+    xml_path = SCANS_DIR / f"{scan_id}.xml"
+    parsed = parse_nmap_xml(xml_path)
+    status = scan_status_store.get(scan_id)
+    exposure = status.exposure_effective if status and status.exposure_effective else "external"
+    annotate_services_with_weak_creds(parsed)
+    for host in parsed.get("hosts", []):
+        for service in host.get("services", []):
+            service["ip"] = host.get("ip")
+            service["nvd"] = enrich_service_with_nvd(service.get("product"), service.get("version"))
+            score = pcvp_score_for_service(service, exposure)
+            service.update(score)
+    audit_path = SCANS_DIR / f"web_audit_{scan_id}.json"
+    web_audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else None
+    return parsed, web_audit
+
+
+@app.get("/scan/{scan_id}/findings")
+def get_findings(scan_id: str):
+    if not (SCANS_DIR / f"{scan_id}.xml").exists():
+        raise HTTPException(status_code=404, detail="Scan output not found yet")
+    parsed, web_audit = enrich_scan_data(scan_id)
+    findings = build_findings(parsed, web_audit)
+    counts = {level: sum(1 for f in findings if f["severity"] == level) for level in ("critical", "high", "medium", "low")}
+    return {"scan_id": scan_id, "summary": counts, "findings": findings}
+
+
+@app.get("/scan/{scan_id}/findings.csv")
+def download_findings_csv(scan_id: str):
+    data = get_findings(scan_id)
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["id", "title", "severity", "confidence", "asset", "source", "cvss", "evidence", "remediation"])
+    writer.writeheader()
+    writer.writerows(data["findings"])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="pcvp_findings_{scan_id}.csv"'},
+    )
 
 @app.get("/scan/{scan_id}/attack-graph")
 def get_attack_graph(scan_id: str):
@@ -753,46 +1054,70 @@ def run_gobuster_scan(scan_id: str, url: str) -> None:
         scan_status_store[scan_id] = scan_st
         _save_scan_status_store()
 
-    cmd = [
-        str(GOBUSTER_EXE),
-        "dir",
-        "-u", url,
-        "-w", str(GOBUSTER_WORDLIST),
-        "-o", str(output_path),
-        "-t", "30",            # a bit lower to reduce load
-        "--timeout", "10s",    # ✅ increased from 2s to avoid false timeouts
-        "-q",
-    ]
-
     gobuster_failed = False
     friendly_error: Optional[str] = None
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # allow more time overall
-        )
+        audit_path = SCANS_DIR / f"web_audit_{scan_id}.json"
+        audit = run_web_security_assessment(url)
+        audit_path.write_text(json.dumps(audit, indent=2), encoding="utf-8")
 
-        if result.returncode != 0:
+        urls = [url]
+        if url.lower().startswith("http://"):
+            urls.append("https://" + url[7:])
+
+        last_error = ""
+        for candidate_url in urls:
+            cmd = [
+                str(GOBUSTER_EXE),
+                "dir",
+                "-u", candidate_url,
+                "-w", str(GOBUSTER_WORDLIST),
+                "-o", str(output_path),
+                "-t", "30",
+                "--timeout", "10s",
+                "--no-tls-validation",
+                "--no-color",
+                "-q",
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode == 0:
+                last_error = ""
+                break
+            last_error = (result.stderr or result.stdout or "").strip()
+
+        if last_error and not output_path.exists():
             gobuster_failed = True
-            raw_err = (result.stderr or "").strip() or f"Gobuster exited with code {result.returncode}"
+            raw_err = last_error or "Gobuster exited with an error"
             friendly_error = _normalize_webscan_error(raw_err)
             with status_path.open("w", encoding="utf-8") as f:
-                f.write(friendly_error)
+                json.dump({
+                    "summary": friendly_error,
+                    "detail": raw_err[:2000],
+                }, f, indent=2)
+        elif last_error:
+            with status_path.open("w", encoding="utf-8") as f:
+                json.dump({
+                    "summary": "Gobuster completed with warnings; partial results are available.",
+                    "detail": last_error[:2000],
+                }, f, indent=2)
 
     except subprocess.TimeoutExpired:
         gobuster_failed = True
         friendly_error = "Web scan timed out (overall gobuster timeout)."
         with status_path.open("w", encoding="utf-8") as f:
-            f.write(friendly_error)
+            json.dump({"summary": friendly_error}, f, indent=2)
 
     except Exception as e:
         gobuster_failed = True
         friendly_error = _normalize_webscan_error(str(e))
         with status_path.open("w", encoding="utf-8") as f:
-            f.write(friendly_error)
+            json.dump({"summary": friendly_error, "detail": str(e)[:2000]}, f, indent=2)
 
     finally:
         # ✅ Always write .done so UI can stop waiting
@@ -816,8 +1141,17 @@ def get_web_scan_status(scan_id: str):
 
     if done_path.exists():
         if status_path.exists():
-            msg = status_path.read_text(encoding="utf-8", errors="ignore").strip() or "Web scan failed."
-            return WebScanStatus(scan_id=scan_id, status="failed", message=msg)
+            try:
+                status_data = json.loads(status_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                status_data = {"summary": status_path.read_text(encoding="utf-8", errors="ignore").strip()}
+            output_path = SCANS_DIR / f"gobuster_{scan_id}.txt"
+            has_results = output_path.exists() and output_path.stat().st_size > 0
+            return WebScanStatus(
+                scan_id=scan_id,
+                status="completed_with_warnings" if has_results else "failed",
+                message=status_data.get("summary") or "Web scan completed with a warning.",
+            )
         return WebScanStatus(scan_id=scan_id, status="completed", message="Gobuster scan completed.")
     else:
         return WebScanStatus(scan_id=scan_id, status="running", message="Gobuster scan is still running or not started.")
@@ -861,9 +1195,14 @@ def get_web_scan_results(scan_id: str):
     status_path = SCANS_DIR / f"gobuster_{scan_id}.status"
 
     error_message = None
+    error_detail = None
     if status_path.exists():
-        with status_path.open("r", encoding="utf-8", errors="ignore") as f:
-            error_message = f.read().strip()
+        try:
+            status_data = json.loads(status_path.read_text(encoding="utf-8"))
+            error_message = status_data.get("summary")
+            error_detail = status_data.get("detail")
+        except json.JSONDecodeError:
+            error_message = status_path.read_text(encoding="utf-8", errors="ignore").strip()
 
     if not output_path.exists():
         if error_message:
@@ -871,6 +1210,7 @@ def get_web_scan_results(scan_id: str):
                 "scan_id": scan_id,
                 "results": [],
                 "error": error_message,
+                "error_detail": error_detail,
             }
         raise HTTPException(status_code=404, detail="Gobuster output not found yet")
 
@@ -879,7 +1219,59 @@ def get_web_scan_results(scan_id: str):
         "scan_id": scan_id,
         "results": entries,
         "error": error_message,
+        "error_detail": error_detail,
     }
+
+
+@app.get("/webscan/{scan_id}/assessment")
+def get_web_security_assessment(scan_id: str):
+    assessment_path = SCANS_DIR / f"web_audit_{scan_id}.json"
+    if not assessment_path.exists():
+        raise HTTPException(status_code=404, detail="Web assessment not available yet")
+    try:
+        return json.loads(assessment_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read web assessment: {exc}")
+
+
+@app.get("/scan/{scan_id}/alive-hosts")
+def get_alive_hosts(scan_id: str):
+    alive_path = SCANS_DIR / f"alive_{scan_id}.json"
+    if alive_path.exists():
+        try:
+            data = json.loads(alive_path.read_text(encoding="utf-8"))
+            hosts = data.get("alive", [])
+            return {"scan_id": scan_id, "hosts": [{"ip": host} for host in hosts]}
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read alive hosts: {exc}")
+
+    xml_path = SCANS_DIR / f"{scan_id}.xml"
+    if not xml_path.exists():
+        raise HTTPException(status_code=404, detail="Scan output not found yet")
+
+    parsed = parse_nmap_xml(xml_path)
+    hosts = []
+    for host in parsed.get("hosts", []):
+        ip = host.get("ip")
+        if ip:
+            hosts.append({
+                "ip": ip,
+                "hostnames": list(dict.fromkeys(
+                    host.get("hostnames", [])
+                    + ([host.get("reverse_dns")] if host.get("reverse_dns") else [])
+                )),
+                "reverse_dns": host.get("reverse_dns"),
+                "mac": host.get("mac"),
+                "mac_vendor": host.get("mac_vendor"),
+                "os": host.get("os", []),
+                "services": len(host.get("services", [])),
+                "ports": [
+                    service.get("port")
+                    for service in host.get("services", [])
+                    if service.get("port") is not None
+                ],
+            })
+    return {"scan_id": scan_id, "hosts": hosts}
 
 @app.post("/scan/{scan_id}/remediation")
 def get_llm_remediation(scan_id: str, req: RemediationRequest):
@@ -955,12 +1347,14 @@ def download_report(scan_id: str):
             svc["pcvp_reasons"] = pcvp["pcvp_reasons"]
 
     attack_graph = build_attack_graph(parsed)
+    findings = build_findings(parsed)
 
     pdf_bytes = build_pdf_report(
         scan_id=scan_id,
-        exposure=scan_status.exposure if scan_status else "auto",
+        exposure=exposure_effective,
         parsed=parsed,
         attack_graph=attack_graph,
+        findings=findings,
     )
 
     return StreamingResponse(
