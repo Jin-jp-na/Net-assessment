@@ -1,0 +1,63 @@
+{
+  "url": "http://192.168.56.101:80",
+  "http": {
+    "status": 200,
+    "final_url": "http://192.168.56.101:80/",
+    "headers": {
+      "Date": "Tue, 24 Nov 2026 21:33:59 GMT",
+      "Server": "Apache/2.2.8 (Ubuntu) DAV/2",
+      "X-Powered-By": "PHP/5.2.4-2ubuntu5.10",
+      "Keep-Alive": "timeout=15, max=100",
+      "Connection": "Keep-Alive",
+      "Content-Type": "text/html"
+    }
+  },
+  "tls": {},
+  "technologies": [
+    {
+      "name": "Server",
+      "evidence": "Apache/2.2.8 (Ubuntu) DAV/2"
+    },
+    {
+      "name": "Powered-By",
+      "evidence": "PHP/5.2.4-2ubuntu5.10"
+    }
+  ],
+  "checks": [
+    {
+      "name": "HSTS",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Content-Security-Policy",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "X-Content-Type-Options",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "X-Frame-Options",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Referrer-Policy",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Permissions-Policy",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Server disclosure",
+      "status": "review",
+      "detail": "Server header is exposed: Apache/2.2.8 (Ubuntu) DAV/2"
+    }
+  ]
+}

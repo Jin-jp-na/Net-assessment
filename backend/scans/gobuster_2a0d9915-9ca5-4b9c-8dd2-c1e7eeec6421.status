@@ -1,0 +1,4 @@
+{
+  "summary": "Gobuster completed with warnings; partial results are available.",
+  "detail": "2026/11/24 14:06:44 error on running gobuster on https://8.8.8.8/: unable to connect to https://8.8.8.8/: Get \"https://8.8.8.8/\": dial tcp 8.8.8.8:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions."
+}

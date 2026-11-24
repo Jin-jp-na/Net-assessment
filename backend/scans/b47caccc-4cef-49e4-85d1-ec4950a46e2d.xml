@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///C:/Program Files (x86)/Nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.992 scan initiated Tue Nov 24 17:40:21 2026 as: &quot;C:\\Program Files (x86)\\Nmap\\nmap.exe&quot; -sV -T4 -Pn -p 80 -oX &quot;D:\\original security project\\backend\\scans\\b47caccc-4cef-49e4-85d1-ec4950a46e2d.xml.tmp&quot; 131.162.225.45 -->
+<nmaprun scanner="nmap" args="&quot;C:\\Program Files (x86)\\Nmap\\nmap.exe&quot; -sV -T4 -Pn -p 80 -oX &quot;D:\\original security project\\backend\\scans\\b47caccc-4cef-49e4-85d1-ec4950a46e2d.xml.tmp&quot; 131.162.225.45" start="1795556421" startstr="Tue Nov 24 17:40:21 2026" version="7.992" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="1" services="80"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<host starttime="1795556422" endtime="1795556423"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="131.162.225.45" addrtype="ipv4"/>
+<hostnames>
+<hostname name="dyna225-45.acadiau.ca" type="PTR"/>
+</hostnames>
+<ports><port protocol="tcp" portid="80"><state state="filtered" reason="no-response" reason_ttl="0"/><service name="http" method="table" conf="3"/></port>
+</ports>
+</host>
+<runstats><finished time="1795556423" timestr="Tue Nov 24 17:40:23 2026" summary="Nmap done at Tue Nov 24 17:40:23 2026; 1 IP address (1 host up) scanned in 1.83 seconds" elapsed="1.83" exit="success"/><hosts up="1" down="0" total="1"/>
+</runstats>
+</nmaprun>

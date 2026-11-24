@@ -1,0 +1,8 @@
+{
+  "url": "http://131.162.225.45:80",
+  "http": {},
+  "tls": {},
+  "technologies": [],
+  "checks": [],
+  "error": "HTTPConnectionPool(host='131.162.225.45', port=80): Max retries exceeded with url: / (Caused by ConnectTimeoutError(<HTTPConnection(host='131.162.225.45', port=80) at 0x22cc1a06ad0>, 'Connection to 131.162.225.45 timed out. (connect timeout=5)'))"
+}

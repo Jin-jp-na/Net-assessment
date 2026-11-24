@@ -10,14 +10,10 @@ from backend import main
 
 class ScanLifecycleTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        root = Path(self.temp.name)
-        for name, value in (("SCANS_DIR", root), ("SCAN_STATUS_FILE", root / "status.json"),
-                            ("scan_status_store", {})):
-            mock = patch.object(main, name, value)
-            mock.start()
-            self.addCleanup(mock.stop)
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(main, "SCANS_DIR", root))
+        self.enterContext(patch.object(main, "SCAN_STATUS_FILE", root / "status.json"))
+        self.enterContext(patch.object(main, "scan_status_store", {}))
 
     def status(self, **kwargs):
         status = main.ScanStatus(scan_id="test", target="127.0.0.1", **kwargs)

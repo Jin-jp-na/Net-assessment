@@ -1,0 +1,4 @@
+{
+  "summary": "Gobuster completed with warnings; partial results are available.",
+  "detail": "2026/11/23 23:15:54 error on running gobuster on https://192.168.1.10/: unable to connect to https://192.168.1.10/: Get \"https://192.168.1.10/\": dial tcp 192.168.1.10:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions."
+}

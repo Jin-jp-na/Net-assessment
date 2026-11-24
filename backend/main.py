@@ -21,7 +21,6 @@ from backend.scanner.nvd_mapping import enrich_service_with_nvd
 from pydantic import BaseModel
 from backend.scanner.pcvp_scoring import pcvp_score_for_service
 from backend.scanner.attack_graph import build_attack_graph
-from backend.scanner.weak_creds import annotate_services_with_weak_creds
 from starlette.responses import StreamingResponse, Response
 from backend.report_generator import build_pdf_report
 from io import BytesIO
@@ -30,6 +29,7 @@ import re
 from typing import Tuple
 import time 
 from datetime import datetime, timezone
+from xml.parsers.expat import ExpatError
 
 
 def infer_exposure_from_target(target: str) -> str:
@@ -79,6 +79,16 @@ def parse_target_and_port(raw: str) -> Tuple[str, Optional[str], Optional[str]]:
 
     return hostport.strip(), None, scheme
 
+
+def is_discovery_host(host: str) -> bool:
+    try:
+        ipaddress.IPv4Address(host)
+        return True
+    except ValueError:
+        label = r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+        return len(host) <= 253 and bool(re.fullmatch(rf"(?=.*[a-zA-Z]){label}(?:\.{label})*\.?", host))
+
+
 GOBUSTER_EXE = BASE_DIR.parent / "gobuster_Windows_x86_64" / "gobuster.exe"
 GOBUSTER_WORDLIST = BASE_DIR.parent / "wordlists" / "common.txt"
 NMAP_SCRIPT_SET = "vuln"
@@ -110,11 +120,6 @@ class ScanStatus(BaseModel):
     completed_at: Optional[str] = None
 
 
-class WebScanRequest(BaseModel):
-    url: str
-    description: Optional[str] = None
-
-
 class WebScanStatus(BaseModel):
     scan_id: str
     status: str
@@ -144,7 +149,7 @@ def _load_scan_status_store() -> None:
                     status.gobuster_status = "skipped"
             scan_status_store[scan_id] = status
         _save_scan_status_store()
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         print(f"[SCAN STORE] Failed to load scan status store: {exc}")
 
 def _save_scan_status_store() -> None:
@@ -157,11 +162,13 @@ def _save_scan_status_store() -> None:
     except Exception as e:
         print(f"[SCAN STORE] Failed to save scan status store: {e}")
 
-def is_cidr_target(s: str) -> bool:
+def is_cidr_target(target: str) -> bool:
+    if "/" not in target:
+        return False
     try:
-        ipaddress.ip_network(s, strict=False)
-        return "/" in s
-    except Exception:
+        ipaddress.ip_network(target, strict=False)
+        return True
+    except ValueError:
         return False
 
 
@@ -265,13 +272,11 @@ def run_nmap_scan_multi(scan_id: str, targets: List[str], ports: Optional[str] =
         if ports:
             cmd += ["-p", ports]
 
-        # ✅ Write to tmp first
         cmd += ["-oX", str(tmp_file)]
         cmd += list(targets)
 
         _run_nmap_command(cmd)
 
-        # ✅ Atomic replace: endpoints will only see a complete XML
         if not tmp_file.exists() or tmp_file.stat().st_size < 100:
             raise RuntimeError("Nmap did not produce a valid XML output file.")
 
@@ -351,7 +356,6 @@ def run_cidr_scan(
         scan_status_store[scan_id] = st
         _save_scan_status_store()
 
-        # ✅ IMPORTANT: run one Nmap scan for all alive hosts -> scans/<scan_id>.xml
         run_nmap_scan_multi(scan_id, alive_hosts, ports=ports)
 
         # run_nmap_scan_multi updates scan status to completed/failed and saves it
@@ -387,7 +391,7 @@ def _normalize_webscan_error(err: str) -> str:
     return f"Web scan could not complete: {e[:500]}"
 
 
-def run_web_security_assessment(url: str) -> dict:
+def run_web_security_assessment(url: str, *, headers_only: bool = False) -> dict:
     parsed_url = urlparse(url)
     if parsed_url.scheme not in ("http", "https") or not parsed_url.hostname:
         return {"url": url, "error": "Unsupported web URL."}
@@ -403,13 +407,17 @@ def run_web_security_assessment(url: str) -> dict:
     response = None
     request_error = None
     try:
-        response = requests.get(url, timeout=15, allow_redirects=True, verify=True)
+        if headers_only:
+            response = requests.head(url, timeout=5, allow_redirects=False)
+        else:
+            response = requests.get(url, timeout=15, allow_redirects=True, verify=True)
     except requests.exceptions.SSLError as exc:
         request_error = str(exc)
-        try:
-            response = requests.get(url, timeout=15, allow_redirects=True, verify=False)
-        except requests.RequestException as fallback_exc:
-            request_error = str(fallback_exc)
+        if not headers_only:
+            try:
+                response = requests.get(url, timeout=15, allow_redirects=True, verify=False)
+            except requests.RequestException as fallback_exc:
+                request_error = str(fallback_exc)
     except requests.RequestException as exc:
         request_error = str(exc)
 
@@ -420,7 +428,7 @@ def run_web_security_assessment(url: str) -> dict:
             "final_url": response.url,
             "headers": dict(response.headers),
         }
-        body_sample = response.text[:200000].lower()
+        body_sample = "" if headers_only else response.text[:200000].lower()
         technology_signatures = {
             "Server": headers.get("server"),
             "Powered-By": headers.get("x-powered-by"),
@@ -466,7 +474,7 @@ def run_web_security_assessment(url: str) -> dict:
     if parsed_url.scheme == "https" and parsed_url.hostname:
         try:
             port = parsed_url.port or 443
-            context = ssl._create_unverified_context()
+            context = ssl.create_default_context() if headers_only else ssl._create_unverified_context()
             with socket.create_connection((parsed_url.hostname, port), timeout=10) as raw_socket:
                 with context.wrap_socket(raw_socket, server_hostname=parsed_url.hostname) as tls_socket:
                     certificate = tls_socket.getpeercert() or {}
@@ -482,6 +490,26 @@ def run_web_security_assessment(url: str) -> dict:
             result["tls"] = {"error": str(exc)}
 
     return result
+
+
+def run_web_headers_scan(scan_id: str, host: str, ports: Optional[str], url: str) -> None:
+    status = scan_status_store.get(scan_id)
+    if status is None:
+        return
+    status.status = "running"
+    status.message = "Checking HTTP headers..."
+    _save_scan_status_store()
+    try:
+        assessment = run_web_security_assessment(url, headers_only=True)
+        output = SCANS_DIR / f"web_audit_{scan_id}.json"
+        output.write_text(json.dumps(assessment, indent=2), encoding="utf-8")
+    except OSError:
+        status.status = "failed"
+        status.message = "Web assessment could not save its results."
+        status.completed_at = _utc_now()
+        _save_scan_status_store()
+        return
+    run_nmap_scan(scan_id, host, ports)
 
 
 @asynccontextmanager
@@ -534,74 +562,64 @@ def run_nmap_scan(scan_id: str, target: str, ports: Optional[str] = None):
 
     status.status = "running"
     status.message = "Nmap scan in progress..."
-    scan_status_store[scan_id] = status
     _save_scan_status_store()
 
     output_file = SCANS_DIR / f"{scan_id}.xml"
     tmp_file = SCANS_DIR / f"{scan_id}.xml.tmp"
+    cmd = [NMAP_PATH, "-T4", "-Pn"]
+    if status.profile != "quick":
+        cmd.insert(1, "-sV")
+    if status.profile in {"vulnerability", "full"}:
+        cmd += ["-O", "--osscan-guess", "--script", NMAP_SCRIPT_SET]
+    if ports:
+        cmd += ["-p", ports]
+    cmd += ["-oX", str(tmp_file), target]
 
     try:
-        profile = status.profile
-        cmd = [
-            NMAP_PATH,
-            "-sV",
-            "-T4",
-            "-Pn",
-        ]
-        if profile in {"vulnerability", "full"}:
-            cmd += ["-O", "--osscan-guess", "--script", NMAP_SCRIPT_SET]
-        elif profile == "quick":
-            cmd = [NMAP_PATH, "-T4", "-Pn"]
-
-        if ports:
-            cmd += ["-p", ports]  # ✅ only scan specified ports
-
-        cmd += ["-oX", str(tmp_file), target]
-
         _run_nmap_command(cmd)
-        if not tmp_file.exists() or tmp_file.stat().st_size < 100:
-            raise RuntimeError("Nmap did not produce a valid XML output file.")
+        if tmp_file.stat().st_size < 100:
+            raise ValueError("Nmap output is incomplete.")
         tmp_file.replace(output_file)
 
-        status.status = "nmap_done"
-        status.message = "Nmap completed. Waiting for Gobuster..."
-
-    except subprocess.TimeoutExpired:
+        if status.gobuster_status == "skipped":
+            status.status = "completed"
+            status.message = "Scan complete."
+            status.completed_at = _utc_now()
+        else:
+            status.status = "nmap_done"
+            status.message = "Nmap completed. Waiting for Gobuster..."
+    except (OSError, ValueError, subprocess.SubprocessError):
         status.status = "failed"
-        status.message = f"Nmap timed out after {NMAP_TIMEOUT_SECONDS} seconds. Try fewer ports."
+        status.message = "Scan failed. Check the target or Nmap setup and try again."
         status.completed_at = _utc_now()
-    except subprocess.CalledProcessError as e:
-        err_msg = e.stderr.decode(errors="ignore") if e.stderr else str(e)
-        status.status = "failed"
-        status.message = f"Scan failed: {err_msg}"
-    except Exception as e:
-        status.status = "failed"
-        status.message = f"Unexpected error: {e}"
     finally:
-        scan_status_store[scan_id] = status
         _save_scan_status_store()
         tmp_file.unlink(missing_ok=True)
 
+
 @app.post("/scan", response_model=ScanStatus)
 def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
-    if not request.target:
+    target = request.target.strip()
+    if not target:
         raise HTTPException(status_code=400, detail="Target is required")
-    try:
-        ip_tmp = ipaddress.ip_address(request.target.strip())
-        if ip_tmp.version == 4 and request.target.strip().endswith(".0"):
-            request.target = f"{request.target.strip()}/24"
-    except Exception:
-        pass
 
-    # ✅ ADD THIS (CIDR subnet scan)
-    if is_cidr_target(request.target):
+    profile = request.profile
+    if profile not in {"quick", "services", "web-headers", "overview", "standard", "vulnerability", "web", "full"}:
+        profile = "standard"
+    checks_web_headers = profile in {"web-headers", "overview"}
+    discovery_only = checks_web_headers or profile in {"quick", "services"}
+    ports = (request.ports or "").strip() or None
+    if not discovery_only and target.endswith(".0"):
+        try:
+            target = f"{ipaddress.IPv4Address(target)}/24"
+        except ValueError:
+            pass
+
+    if not discovery_only and is_cidr_target(target):
         scan_id = str(uuid4())
-        ports = (request.ports or "").strip() or None
-
-        profile = request.profile if request.profile in {"quick", "standard", "vulnerability", "web", "full"} else "standard"
         status = ScanStatus(
             scan_id=scan_id,
-            target=request.target,  # keep CIDR as target label
+            target=target,
             status="pending",
             message="CIDR scan scheduled (Angry IP discovery + combined Nmap)",
             exposure=request.exposure or "auto",
@@ -614,34 +632,37 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         scan_status_store[scan_id] = status
         _save_scan_status_store()
 
-        background_tasks.add_task(run_cidr_scan, scan_id, request.target, ports)
+        background_tasks.add_task(run_cidr_scan, scan_id, target, ports)
         return status
-    # ✅ END CIDR BLOCK
 
-    host, implied_port, scheme = parse_target_and_port(request.target)
+    host, implied_port, scheme = parse_target_and_port(target)
+    if discovery_only:
+        if not is_discovery_host(host):
+            raise HTTPException(status_code=400, detail="Enter one IPv4 address or hostname")
+        if implied_port and (
+            not re.fullmatch(r"[0-9]{1,5}", implied_port) or not 1 <= int(implied_port) <= 65535
+        ):
+            raise HTTPException(status_code=400, detail="Port must be between 1 and 65535")
+    ports = ports or implied_port
+    if checks_web_headers:
+        scheme = scheme or "http"
+        web_port = ports or ("443" if scheme == "https" else "80")
+        if not re.fullmatch(r"[0-9]{1,5}", web_port) or not 1 <= int(web_port) <= 65535:
+            raise HTTPException(status_code=400, detail="Web assessment requires a single valid port")
+        if profile == "web-headers":
+            ports = web_port
+        web_url = f"{scheme}://{host}:{web_port}"
 
-    # user-provided ports (optional)
-    ports = (request.ports or "").strip() or None
-
-    # if user typed host:port and didn't provide ports separately, use that
-    if implied_port and not ports:
-        ports = implied_port
-
-    exposure_choice = request.exposure or "auto"
-    if exposure_choice == "auto":
-        exposure_effective = infer_exposure_from_target(host)
-    else:
-        exposure_effective = exposure_choice
-
+    exposure = request.exposure or "auto"
     scan_id = str(uuid4())
-    profile = request.profile if request.profile in {"quick", "standard", "vulnerability", "web", "full"} else "standard"
     status = ScanStatus(
         scan_id=scan_id,
-        target=host,  # ✅ store clean host (not host:port)
+        target=host,
         status="pending",
-        message="Nmap + Gobuster scan scheduled",
-        exposure=exposure_choice,
-        exposure_effective=exposure_effective,
+        message="Scan scheduled",
+        exposure=exposure,
+        exposure_effective=infer_exposure_from_target(host) if exposure == "auto" else exposure,
+        gobuster_status="skipped" if discovery_only else "pending",
         profile=profile,
         description=request.description,
         created_at=_utc_now(),
@@ -649,65 +670,37 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     scan_status_store[scan_id] = status
     _save_scan_status_store()
 
-    # ✅ Nmap: scan host, optionally specific ports
-    background_tasks.add_task(run_nmap_scan, scan_id=scan_id, target=host, ports=ports)
-
-    # ✅ Gobuster: build URL including scheme and port (if single port)
-    netloc = host
-    if ports and ports.isdigit():
-        netloc = f"{host}:{ports}"
-
-    if not scheme:
-        scheme = "http"
-
-    target_url = f"{scheme}://{netloc}"
-    if profile in {"web", "full", "standard", "vulnerability"}:
-        background_tasks.add_task(run_gobuster_scan, scan_id, target_url)
+    if checks_web_headers:
+        background_tasks.add_task(run_web_headers_scan, scan_id, host, ports, web_url)
     else:
-        status.gobuster_status = "skipped"
-        scan_status_store[scan_id] = status
-        _save_scan_status_store()
+        background_tasks.add_task(run_nmap_scan, scan_id=scan_id, target=host, ports=ports)
+        if not discovery_only:
+            netloc = f"{host}:{ports}" if ports and ports.isdigit() else host
+            background_tasks.add_task(run_gobuster_scan, scan_id, f"{scheme or 'http'}://{netloc}")
 
     return status
+
+
 @app.get("/scan/{scan_id}", response_model=ScanStatus)
 def get_scan_status(scan_id: str):
     status = scan_status_store.get(scan_id)
     if not status:
         raise HTTPException(status_code=404, detail="Scan not found")
 
-    # The worker owns the active stage. File size does not prove Nmap exited.
-    if status.status not in {"nmap_done"}:
+    if status.status != "nmap_done":
         return status
 
-    xml_path = SCANS_DIR / f"{scan_id}.xml"
     done_path = SCANS_DIR / f"gobuster_{scan_id}.done"
-
-    nmap_done = xml_path.exists() and xml_path.stat().st_size > 100
-    gobuster_done = done_path.exists()
-
-    # ✅ CIDR scans skip gobuster, so don't wait for gobuster_.done
-    if status.gobuster_status == "skipped":
-        gobuster_done = True
-
-    if nmap_done and gobuster_done:
+    if status.gobuster_status == "skipped" or done_path.exists():
         status.status = "completed"
-        if not status.completed_at:
-            status.completed_at = _utc_now()
-        # if gobuster was skipped, keep it skipped; otherwise mark completed
+        status.completed_at = status.completed_at or _utc_now()
         if status.gobuster_status != "skipped":
             status.gobuster_status = "completed"
         status.message = "Scan fully completed."
-        scan_status_store[scan_id] = status
         _save_scan_status_store()
 
-    elif nmap_done and not gobuster_done:
-        status.status = "nmap_done"
-        status.gobuster_status = "running"
-        if status.status not in ("failed",):
-            status.message = "Nmap completed. Waiting for Gobuster..."
-        scan_status_store[scan_id] = status
-
     return status
+
 
 @app.get("/scan/{scan_id}/raw")
 def get_raw_scan(scan_id: str):
@@ -721,29 +714,8 @@ def get_raw_scan(scan_id: str):
     return {"scan_id": scan_id, "xml": content}
 
 def parse_nmap_xml(xml_path: Path) -> dict:
-    if not xml_path.exists():
-        raise FileNotFoundError(f"XML file not found: {xml_path}")
-
-    # ✅ Wait a bit if Nmap is still writing the file (prevents truncated XML parse)
-    xml_content = ""
-    for _ in range(20):  # 20 * 0.5s = 10 seconds max wait
-        with open(xml_path, "r", encoding="utf-8", errors="ignore") as f:
-            xml_content = f.read()
-
-        if xml_content.strip() and "</nmaprun>" in xml_content:
-            break
-
-        time.sleep(0.5)
-
-    if not xml_content.strip():
-        raise ValueError("Nmap XML is empty (scan not finished yet)")
-
-    if "</nmaprun>" not in xml_content:
-        raise ValueError("Nmap XML is incomplete (scan still running). Try again in a few seconds.")
-
-    data = xmltodict.parse(xml_content)
-
-    nmaprun = data.get("nmaprun", {})
+    data = xmltodict.parse(xml_path.read_bytes())
+    nmaprun = data.get("nmaprun") or {}
     raw_hosts = nmaprun.get("host", [])
 
     if isinstance(raw_hosts, dict):
@@ -858,25 +830,22 @@ def parse_nmap_xml(xml_path: Path) -> dict:
 @app.get("/scan/{scan_id}/parsed")
 def get_parsed_scan(scan_id: str):
     xml_path = SCANS_DIR / f"{scan_id}.xml"
-    if not xml_path.exists():
-        raise HTTPException(status_code=404, detail="Scan output not found yet")
-
     try:
         parsed = parse_nmap_xml(xml_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse XML: {e}")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Scan output not found yet")
+    except (OSError, ExpatError):
+        raise HTTPException(status_code=500, detail="Scan results could not be read")
 
-    return {
-        "scan_id": scan_id,
-        "data": parsed,
-    }
+    return {"scan_id": scan_id, "data": parsed}
+
 
 @app.get("/scan/{scan_id}/nvd")
 def get_scan_with_nvd(scan_id: str):
     scan_status = scan_status_store.get(scan_id)
     if not scan_status:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if getattr(scan_status, "status", "") not in ("completed", "nmap_done"):
+    if scan_status.status not in ("completed", "nmap_done"):
         raise HTTPException(status_code=400, detail=f"Scan not completed ({scan_status.status}): {scan_status.message}")
 
     xml_path = SCANS_DIR / f"{scan_id}.xml"
@@ -894,31 +863,11 @@ def get_scan_with_nvd(scan_id: str):
         else infer_exposure_from_target(scan_status.target)
     )
 
-    annotate_services_with_weak_creds(parsed)
 
-    host_count = 0
     for host in parsed.get("hosts", []):
-        host_count += 1
-        svc_count = 0
         for svc in host.get("services", []):
-            svc_count += 1
-            product = svc.get("product")
-            version = svc.get("version")
-
-            try:
-                svc["nvd"] = enrich_service_with_nvd(product, version)
-            except Exception as nvd_err:
-                svc["nvd"] = {"keyword": None, "cves": [], "error": str(nvd_err)}
-
-            try:
-                pcvp = pcvp_score_for_service(svc, exposure_effective)
-                svc["pcvp_score"] = pcvp["pcvp_score"]
-                svc["pcvp_level"] = pcvp["pcvp_level"]
-                svc["pcvp_reasons"] = pcvp["pcvp_reasons"]
-            except Exception:
-                svc["pcvp_score"] = 0
-                svc["pcvp_level"] = "informational"
-                svc["pcvp_reasons"] = []
+            svc["nvd"] = enrich_service_with_nvd(svc.get("product"), svc.get("version"))
+            svc.update(pcvp_score_for_service(svc, exposure_effective))
 
     return {"scan_id": scan_id, "exposure": scan_status.exposure, "profile": scan_status.profile, "data": parsed}
 
@@ -987,16 +936,18 @@ def enrich_scan_data(scan_id: str) -> tuple[dict, Optional[dict]]:
     parsed = parse_nmap_xml(xml_path)
     status = scan_status_store.get(scan_id)
     exposure = status.exposure_effective if status and status.exposure_effective else "external"
-    annotate_services_with_weak_creds(parsed)
     for host in parsed.get("hosts", []):
         for service in host.get("services", []):
             service["ip"] = host.get("ip")
             service["nvd"] = enrich_service_with_nvd(service.get("product"), service.get("version"))
             score = pcvp_score_for_service(service, exposure)
             service.update(score)
+    return parsed, read_saved_web_audit(scan_id)
+
+
+def read_saved_web_audit(scan_id: str) -> Optional[dict]:
     audit_path = SCANS_DIR / f"web_audit_{scan_id}.json"
-    web_audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else None
-    return parsed, web_audit
+    return json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else None
 
 
 @app.get("/scan/{scan_id}/findings")
@@ -1027,7 +978,7 @@ def get_attack_graph(scan_id: str):
     scan_status = scan_status_store.get(scan_id)
     if not scan_status:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if getattr(scan_status, "status", "") not in ("completed", "nmap_done"):
+    if scan_status.status not in ("completed", "nmap_done"):
         raise HTTPException(status_code=400, detail=f"Scan not completed ({scan_status.status}): {scan_status.message}")
 
     xml_path = SCANS_DIR / f"{scan_id}.xml"
@@ -1052,9 +1003,7 @@ def get_attack_graph(scan_id: str):
             svc["nvd"] = enrich_service_with_nvd(product, version)
 
             pcvp = pcvp_score_for_service(svc, exposure_effective)
-            svc["pcvp_score"] = pcvp["pcvp_score"]
-            svc["pcvp_level"] = pcvp["pcvp_level"]
-            svc["pcvp_reasons"] = pcvp["pcvp_reasons"]
+            svc.update(pcvp)
 
     graph = build_attack_graph(parsed)
     return {"scan_id": scan_id, "exposure": scan_status.exposure, "graph": graph}
@@ -1065,7 +1014,6 @@ def run_gobuster_scan(scan_id: str, url: str) -> None:
     done_path = SCANS_DIR / f"gobuster_{scan_id}.done"
     SCANS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ✅ Mark gobuster as running
     scan_st = scan_status_store.get(scan_id)
     if scan_st:
         scan_st.gobuster_status = "running"
@@ -1138,20 +1086,17 @@ def run_gobuster_scan(scan_id: str, url: str) -> None:
             json.dump({"summary": friendly_error, "detail": str(e)[:2000]}, f, indent=2)
 
     finally:
-        # ✅ Always write .done so UI can stop waiting
         try:
             with done_path.open("w", encoding="utf-8") as f:
                 f.write("done")
         except Exception as e:
             print(f"[GOBUSTER] Failed to write .done file: {e}")
 
-        # ✅ Mark gobuster status accurately
         scan_st = scan_status_store.get(scan_id)
         if scan_st:
             scan_st.gobuster_status = "failed" if gobuster_failed else "completed"
             scan_status_store[scan_id] = scan_st
             _save_scan_status_store()
-# ✅ Now checks .done file instead of .txt file
 @app.get("/webscan/{scan_id}", response_model=WebScanStatus)
 def get_web_scan_status(scan_id: str):
     done_path = SCANS_DIR / f"gobuster_{scan_id}.done"
@@ -1307,19 +1252,16 @@ def download_report(scan_id: str):
         else infer_exposure_from_target(scan_status.target) if scan_status else "external"
     )
 
-    annotate_services_with_weak_creds(parsed)
 
     for host in parsed.get("hosts", []):
         for svc in host.get("services", []):
             svc["ip"] = host.get("ip")
             svc["nvd"] = enrich_service_with_nvd(svc.get("product"), svc.get("version"))
             pcvp = pcvp_score_for_service(svc, exposure_effective)
-            svc["pcvp_score"] = pcvp["pcvp_score"]
-            svc["pcvp_level"] = pcvp["pcvp_level"]
-            svc["pcvp_reasons"] = pcvp["pcvp_reasons"]
+            svc.update(pcvp)
 
     attack_graph = build_attack_graph(parsed)
-    findings = build_findings(parsed)
+    findings = build_findings(parsed, read_saved_web_audit(scan_id))
 
     pdf_bytes = build_pdf_report(
         scan_id=scan_id,

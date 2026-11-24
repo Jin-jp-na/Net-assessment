@@ -1,0 +1,8 @@
+{
+  "url": "http://testphp.vulnweb.com",
+  "http": {},
+  "tls": {},
+  "technologies": [],
+  "checks": [],
+  "error": "HTTPConnectionPool(host='testphp.vulnweb.com', port=80): Max retries exceeded with url: / (Caused by NewConnectionError(\"HTTPConnection(host='testphp.vulnweb.com', port=80): Failed to establish a new connection: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions\"))"
+}

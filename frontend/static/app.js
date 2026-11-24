@@ -8,174 +8,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   const statusDiv = document.getElementById("scan-status");
   const startBtn = document.getElementById("start-scan-btn");
 
-  // Check server boot id to detect backend restarts and avoid restoring stale cached scans
-  try {
-    const hb = await fetch("/health");
-    if (hb.ok) {
-      const info = await hb.json();
-      const serverBoot = info.boot_id || null;
-      const savedBoot = localStorage.getItem("pcvp:bootId");
-      if (!savedBoot || savedBoot !== serverBoot) {
-        localStorage.removeItem("pcvp:lastScanId");
-        localStorage.removeItem("pcvp:lastServicesHtml");
-        localStorage.removeItem("pcvp:lastStats");
-        localStorage.removeItem("pcvp:lastTarget");
-        localStorage.removeItem("pcvp:lastExposure");
-      }
-      if (serverBoot) localStorage.setItem("pcvp:bootId", serverBoot);
-    }
-  } catch (e) {}
-
-  const saved = localStorage.getItem("pcvp:lastScanId");
-  if (saved) {
-    try {
-      const resp = await fetch(`/scan/${saved}`);
-      if (resp.ok) {
-        currentScanId = saved;
-        statusDiv.textContent = `Restored last scan: ${currentScanId}`;
-
-        const cachedHtml = localStorage.getItem("pcvp:lastServicesHtml");
-        const cachedStats = localStorage.getItem("pcvp:lastStats");
-        const cachedServices = localStorage.getItem("pcvp:lastServices");
-        let hasCachedServices = false;
-
-        if (cachedServices) {
-        try {
-          currentServices = JSON.parse(cachedServices);
-          hasCachedServices = true;
-        } catch (e) {}
-      }
-
-      if (cachedHtml) {
-        document.querySelector("#services-table tbody").innerHTML = cachedHtml;
-        // ✅ Re-attach click listeners after restoring HTML
-        document.querySelector("#services-table tbody")
-          .querySelectorAll(".btn-link")
-          .forEach((btn) => btn.addEventListener("click", onDetailsClick));
-        hasCachedServices = true;
-      }
-
-
-        if (cachedStats) {
-          const stats = JSON.parse(cachedStats);
-          document.getElementById("stat-hosts").textContent = stats.hosts || "0";
-          document.getElementById("stat-services").textContent = stats.services || "0";
-          document.getElementById("stat-critical").textContent = stats.critical || "0 / 0";
-          document.getElementById("stat-weak-creds").textContent = stats.weak || "0";
-          hasCachedServices = true;
-        }
-
-       const cachedGraphText = localStorage.getItem("pcvp:lastGraphText");
-const cachedGraph = localStorage.getItem("pcvp:lastGraph");
-let hasCachedGraph = false;
-
-if (cachedGraphText) {
-  document.getElementById("attack-graph-content").innerHTML = cachedGraphText;
-  hasCachedGraph = true;
-}
-
-// ✅ Re-render vis.js network from cached graph data
-if (cachedGraph) {
-  try {
-    const graph = JSON.parse(cachedGraph);
-    const nodes = graph.nodes || [];
-    const edges = graph.edges || [];
-    const graphContainer = document.getElementById("attack-graph-network");
-    graphContainer.innerHTML = "";
-
-    if (nodes.length && edges.length) {
-      const visNodes = new vis.DataSet(
-        nodes.map((n) => {
-          let label = n.id, color = "#6b7280", shape = "ellipse";
-          if (n.type === "host") { label = n.ip || n.id; color = "#1d4ed8"; shape = "box"; }
-          else if (n.type === "service") {
-            const level = (n.pcvp_level || "").toLowerCase();
-            label = `${n.service || "svc"}\n${n.port || ""}/${n.protocol || ""}`;
-            if (level === "critical") color = "#dc2626";
-            else if (level === "high") color = "#f97316";
-            else if (level === "medium") color = "#eab308";
-            else if (level === "low") color = "#22c55e";
-            else color = "#6b7280";
-          } else if (n.type === "cve") { 
-            label = n.cve_id || "CVE"; 
-            color = "#0ea5e9"; 
-            shape = "diamond"; 
-          }
-          return { id: n.id, label, color, shape, font: { color: "#e5e7eb", size: 12 } };
-        })
-      );
-
-      const visEdges = new vis.DataSet(
-        edges.map((e) => {
-          let color = "#4b5563", dashes = false, label = "";
-          if (e.relation === "runs") { label = "runs"; color = "#6b7280"; }
-          else if (e.relation === "has_vulnerability") { label = "has CVE"; color = "#0ea5e9"; }
-          else if (e.relation === "possible_chain") { label = "pivot"; color = "#f97316"; dashes = true; }
-          return { from: e.from, to: e.to, color, dashes, arrows: "to", label, font: { align: "middle", color: "#9ca3af", size: 10 } };
-        })
-      );
-
-      new vis.Network(graphContainer, { nodes: visNodes, edges: visEdges }, {
-        autoResize: true,
-        physics: { stabilization: true, barnesHut: { springLength: 120, springConstant: 0.01 } },
-        interaction: { tooltipDelay: 200, hover: true },
-        nodes: { borderWidth: 1 },
-        layout: { improvedLayout: true },
-      });
-    }
-  } catch (e) {
-    console.error("Failed to restore attack graph network:", e);
-  }
-}
-
-        const cachedGobuster = localStorage.getItem("pcvp:lastGobusterHtml");
-        let hasCachedGobuster = false;
-        if (cachedGobuster) {
-          document.querySelector("#gobuster-table tbody").innerHTML = cachedGobuster;
-          hasCachedGobuster = true;
-        }
-
-       if (!hasCachedServices) loadScanResults(currentScanId);
-       loadAliveHosts(currentScanId);
-       loadWebAssessment(currentScanId);
-       if (!hasCachedGobuster) loadGobusterResults(currentScanId);
-       if (!hasCachedGraph) loadAttackGraph(currentScanId);
-
-        // ✅ Only poll if scan is not already completed
-        const scanData = await fetch(`/scan/${currentScanId}`).then(r => r.json());
-        if (scanData.status !== "completed") {
-          pollScanStatus(currentScanId);
-        } else {
-          statusDiv.textContent = `Restored last scan: ${currentScanId}`;
-        }
-      } else {
-        localStorage.removeItem("pcvp:lastScanId");
-        localStorage.removeItem("pcvp:lastServicesHtml");
-        localStorage.removeItem("pcvp:lastStats");
-        localStorage.removeItem("pcvp:lastServices");
-        localStorage.removeItem("pcvp:lastGobusterHtml");
-        localStorage.removeItem("pcvp:lastGraphText");
-        resetOverview();
-        setTableLoadingStates();
-        statusDiv.textContent = "";
-      }
-    } catch (e) {
-      localStorage.removeItem("pcvp:lastScanId");
-      localStorage.removeItem("pcvp:lastServicesHtml");
-      localStorage.removeItem("pcvp:lastStats");
-      localStorage.removeItem("pcvp:lastGobusterHtml");
-      localStorage.removeItem("pcvp:lastGraphText");
-      resetOverview();
-      setTableLoadingStates();
-      statusDiv.textContent = "";
-    }
-  }
-
-  const savedTarget = localStorage.getItem("pcvp:lastTarget");
-  const savedExposure = localStorage.getItem("pcvp:lastExposure");
-  if (savedTarget) document.getElementById("target").value = savedTarget;
-  if (savedExposure) document.getElementById("exposure").value = savedExposure;
-
   const modal = document.getElementById("service-details-modal");
   const modalCloseBtn = document.getElementById("modal-close-btn");
   modalCloseBtn.addEventListener("click", () => (modal.style.display = "none"));
@@ -183,30 +15,35 @@ if (cachedGraph) {
     if (e.target === modal) modal.style.display = "none";
   });
 
-  await loadScanHistory();
+  loadScanHistory();
   const refreshHistoryBtn = document.getElementById("refresh-history-btn");
   if (refreshHistoryBtn) refreshHistoryBtn.addEventListener("click", loadScanHistory);
   const historyBody = document.querySelector("#history-table tbody");
   if (historyBody) {
     historyBody.addEventListener("click", (event) => {
       const button = event.target.closest("[data-history-scan-id]");
-      if (button) restoreHistoricalScan(button.dataset.historyScanId);
+      if (button && !startBtn.disabled) restoreHistoricalScan(button.dataset.historyScanId);
     });
   }
+  document.getElementById("download-report-btn").addEventListener("click", () => {
+    if (currentScanId && !startBtn.disabled) window.location.href = `/scan/${currentScanId}/report.pdf`;
+  });
+
+  document.getElementById("service-search").addEventListener("input", (event) => {
+    const query = event.target.value.trim().toLowerCase();
+    for (const row of document.querySelectorAll("#services-table tbody tr")) {
+      row.hidden = Boolean(query) && !row.textContent.toLowerCase().includes(query);
+    }
+  });
+
   const findingsDownload = document.getElementById("download-findings-btn");
   if (findingsDownload) {
     findingsDownload.addEventListener("click", () => {
-      if (currentScanId) window.location.href = `/scan/${currentScanId}/findings.csv`;
+      if (currentScanId && !startBtn.disabled) window.location.href = `/scan/${currentScanId}/findings.csv`;
     });
   }
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    // ✅ Clear cached UI from previous scan
-    localStorage.removeItem("pcvp:lastServicesHtml");
-    localStorage.removeItem("pcvp:lastStats");
-    localStorage.removeItem("pcvp:lastServices");
-    localStorage.removeItem("pcvp:lastGobusterHtml");
-    localStorage.removeItem("pcvp:lastGraphText");
 
     const target = document.getElementById("target").value.trim();
     const exposure = document.getElementById("exposure").value;
@@ -222,6 +59,7 @@ if (cachedGraph) {
       statusIntervalId = null;
     }
 
+    currentScanId = null;
     resetOverview();
     setTableLoadingStates();
 
@@ -237,7 +75,9 @@ if (cachedGraph) {
       });
 
       if (!resp.ok) {
-        statusDiv.textContent = `Error starting scan: ${resp.status}`;
+        statusDiv.textContent = resp.status === 400
+          ? "Enter one IPv4 address or hostname, with an optional port."
+          : "Scan failed. Try again.";
         startBtn.disabled = false;
         return;
       }
@@ -245,9 +85,6 @@ if (cachedGraph) {
       const data = await resp.json();
       currentScanId = data.scan_id;
       currentExposure = data.exposure || exposure;
-      localStorage.setItem("pcvp:lastScanId", currentScanId);
-      localStorage.setItem("pcvp:lastTarget", target);
-      localStorage.setItem("pcvp:lastExposure", currentExposure);
       statusDiv.textContent = `Scan started (ID: ${currentScanId}). Waiting for completion...`;
       pollScanStatus(currentScanId);
       await loadScanHistory();
@@ -349,12 +186,13 @@ async function restoreHistoricalScan(scanId) {
   const scan = await response.json();
   currentScanId = scan.scan_id;
   currentExposure = scan.exposure || scan.exposure_effective || "auto";
-  localStorage.setItem("pcvp:lastScanId", currentScanId);
   document.getElementById("scan-status").textContent = `Viewing scan ${scan.scan_id}`;
-  document.getElementById("profile").value = scan.profile || "standard";
+
   resetOverview();
   setTableLoadingStates();
-  if (scan.status === "completed") {
+  if (scan.status === "failed") {
+    document.getElementById("scan-status").textContent = scan.message || "Scan failed.";
+  } else if (scan.status === "completed") {
     await Promise.all([
       loadScanResults(scan.scan_id),
       loadFindings(scan.scan_id),
@@ -432,7 +270,7 @@ function pollScanStatus(scanId) {
               throw e;
             }),
           ]);
-          statusDiv.textContent = `Scan fully completed (Nmap + Gobuster).`;
+          statusDiv.textContent = `Scan complete.`;
           await loadScanHistory();
         } catch (loadErr) {
           console.error("[LOADING] Error loading results:", loadErr);
@@ -519,12 +357,6 @@ async function loadScanResults(scanId) {
     document.getElementById("stat-critical").textContent = `${criticalCount} / ${highCount}`;
     document.getElementById("stat-weak-creds").textContent = weakCount;
 
-   // ✅ Save stats immediately
-localStorage.setItem("pcvp:lastStats", JSON.stringify({
-  hosts: hostCount, services: serviceCount,
-  critical: `${criticalCount} / ${highCount}`, weak: weakCount,
-}));
-localStorage.setItem("pcvp:lastServices", JSON.stringify(currentServices));
 
 if (!rows.length) {
   servicesBody.innerHTML = `<tr><td colspan="9">No services detected for this scan.</td></tr>`;
@@ -546,15 +378,15 @@ for (const svc of rows) {
   const weakPillClass = svc.weak_creds && svc.weak_creds.found ? "pill pill-weak" : "pill";
   const nseCount = Array.isArray(svc.nse_findings) ? svc.nse_findings.length : 0;
   tr.innerHTML = `
-    <td>${svc.ip || ""}</td>
-    <td>${svc.port}</td>
-    <td>${svc.service || ""}</td>
-    <td>${(svc.product || "") + " " + (svc.version || "")}</td>
-    <td><span class="badge ${badgeClass}">${level}</span></td>
-    <td>${svc.pcvp_score ?? ""}</td>
-    <td><span class="${weakPillClass}">${weakCredsText}</span></td>
+    <td>${escapeHtml(svc.ip || "")}</td>
+    <td>${escapeHtml(svc.port)}/${escapeHtml(svc.protocol)} (${escapeHtml(svc.state)})</td>
+    <td>${escapeHtml(svc.service || "")}</td>
+    <td>${escapeHtml((svc.product || "") + " " + (svc.version || ""))}</td>
+    <td><span class="badge ${badgeClass}">${escapeHtml(level)}</span></td>
+    <td>${escapeHtml(svc.pcvp_score ?? "")}</td>
+    <td><span class="${weakPillClass}">${escapeHtml(weakCredsText)}</span></td>
     <td>${nseCount ? `<span class="pill pill-weak">${nseCount} finding(s)</span>` : "None"}</td>
-    <td><button class="btn-link" data-ip="${svc.ip}" data-port="${svc.port}" data-proto="${svc.protocol}">Details</button></td>
+    <td><button class="btn-link" data-ip="${escapeHtml(svc.ip)}" data-port="${escapeHtml(svc.port)}" data-proto="${escapeHtml(svc.protocol)}">Details</button></td>
   `;
   servicesBody.appendChild(tr);
 }
@@ -562,12 +394,10 @@ servicesBody.querySelectorAll(".btn-link").forEach((btn) =>
   btn.addEventListener("click", onDetailsClick)
 );
 
-// ✅ Save HTML AFTER rows are fully rendered
-localStorage.setItem("pcvp:lastServicesHtml", servicesBody.innerHTML);
 } catch (err) {
   console.error("[loadScanResults] CATCH ERROR:", err.name, err.message);
   console.error("[loadScanResults] Full error:", err);
-  servicesBody.innerHTML = `<tr><td colspan="9">Error loading NVD/RiskLens data: ${err.message}</td></tr>`;
+  servicesBody.innerHTML = `<tr><td colspan="9">Error loading NVD/RiskLens data: ${escapeHtml(err.message)}</td></tr>`;
 }
 }
 
@@ -625,6 +455,17 @@ async function loadWebAssessment(scanId) {
     const checks = data.checks || [];
     const technologies = data.technologies || [];
     const tls = data.tls || {};
+    if (data.error && !data.http?.status && !tls.protocol) {
+      const message = data.error.includes("WinError 10013")
+        ? "Windows blocked the connection to this address and port."
+        : "The web server did not return an HTTP response.";
+      container.innerHTML = `
+        <p><strong>Target:</strong> ${escapeHtml(data.url || "")}</p>
+        <p>${message}</p>
+        <details><summary>Technical details</summary><p>${escapeHtml(data.error)}</p></details>
+      `;
+      return;
+    }
     const checkRows = checks.length
       ? checks.map(check => `<li><strong>${escapeHtml(check.name)}</strong>: ${escapeHtml(check.status)} — ${escapeHtml(check.detail)}</li>`).join("")
       : "<li>No HTTP checks returned.</li>";
@@ -690,13 +531,12 @@ async function loadGobusterResults(scanId) {
     for (const r of results) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
-        <td>${r.path}</td>
-        <td>${r.status}</td>
-        <td>${r.size ?? ""}</td>
+        <td>${escapeHtml(r.path)}</td>
+        <td>${escapeHtml(r.status)}</td>
+        <td>${escapeHtml(r.size ?? "")}</td>
       `;
       gobBody.appendChild(tr);
     }
-    localStorage.setItem("pcvp:lastGobusterHtml", gobBody.innerHTML);
   } catch (err) {
     console.error(err);
     gobBody.innerHTML = `<tr><td colspan="3">Error loading Gobuster results (see console).</td></tr>`;
@@ -731,7 +571,10 @@ async function loadAttackGraph(scanId) {
     const nodeById = {};
     nodes.forEach((n) => (nodeById[n.id] = n));
 
-    const visNodes = new vis.DataSet(
+    if (typeof vis === "undefined") graphContainer.hidden = true;
+    else {
+      graphContainer.hidden = false;
+      const visNodes = new vis.DataSet(
       nodes.map((n) => {
         let label = n.id, color = "#6b7280", shape = "ellipse";
         if (n.type === "host") { label = n.ip || n.id; color = "#1d4ed8"; shape = "box"; }
@@ -766,6 +609,8 @@ async function loadAttackGraph(scanId) {
       layout: { improvedLayout: true },
     });
 
+    }
+
     const hostServices = {};
     edges.forEach((e) => {
       if (e.relation === "runs") {
@@ -797,10 +642,10 @@ if (!chains.length) {
   let html = "<ul>";
   for (const ch of chains) {
     html += "<li style='margin-bottom:6px;'>";
-    html += `<strong>${ch.service}</strong> on <strong>${ch.hostIp}:${ch.port}</strong> `;
-    html += `(RiskLens: ${ch.level.toUpperCase()} score ${ch.score})`;
-    if (ch.cves.length) { html += "<br><span style='color:#9ca3af;'>Exploitable via:</span> " + ch.cves.map((id) => `<code>${id}</code>`).join(", "); }
-    if (ch.nextServices.length) { html += "<br><span style='color:#9ca3af;'>Potential pivot to:</span> " + ch.nextServices.join(", "); }
+    html += `<strong>${escapeHtml(ch.service)}</strong> on <strong>${escapeHtml(ch.hostIp)}:${escapeHtml(ch.port)}</strong> `;
+    html += `(RiskLens: ${escapeHtml(ch.level.toUpperCase())} score ${escapeHtml(ch.score)})`;
+    if (ch.cves.length) { html += "<br><span style='color:#9ca3af;'>Exploitable via:</span> " + ch.cves.map((id) => `<code>${escapeHtml(id)}</code>`).join(", "); }
+    if (ch.nextServices.length) { html += "<br><span style='color:#9ca3af;'>Potential pivot to:</span> " + ch.nextServices.map(escapeHtml).join(", "); }
     html += "</li>";
   }
   html += "</ul>";
@@ -808,8 +653,6 @@ if (!chains.length) {
 }
 
 // ✅ Always save cache regardless of chains length
-localStorage.setItem("pcvp:lastGraph", JSON.stringify(graph));
-localStorage.setItem("pcvp:lastGraphText", textContainer.innerHTML || textContainer.textContent);
   } catch (err) {
     console.error(err);
     textContainer.textContent = "Error building attack graph (see console).";
@@ -826,7 +669,7 @@ function onDetailsClick(e) {
   const modal = document.getElementById("service-details-modal");
   const title = document.getElementById("modal-title");
   const body = document.getElementById("modal-body");
-  title.textContent = `${svc.service || ""} on ${svc.ip}:${svc.port}/${svc.protocol}`;
+  title.textContent = `${escapeHtml(svc.service || "")} on ${escapeHtml(svc.ip)}:${escapeHtml(svc.port)}/${escapeHtml(svc.protocol)}`;
 
   const reasons = svc.pcvp_reasons || [];
   const nvd = svc.nvd || {};
@@ -835,7 +678,7 @@ function onDetailsClick(e) {
   let html = "";
   html += `<div><strong>Product:</strong> ${escapeHtml(svc.product || "")} ${escapeHtml(svc.version || "")}</div>`;
   html += `<div><strong>Exposure:</strong> ${escapeHtml(currentExposure || "auto")}</div>`;
-  html += `<div><strong>RiskLens:</strong> ${escapeHtml(svc.pcvp_level || "")} (score ${svc.pcvp_score ?? ""})</div>`;
+  html += `<div><strong>RiskLens:</strong> ${escapeHtml(svc.pcvp_level || "")} (score ${escapeHtml(svc.pcvp_score ?? "")})</div>`;
   if (svc.weak_creds && svc.weak_creds.found) {
     html += `<div style="margin-top:4px;"><strong>Weak Credentials:</strong> ${escapeHtml(`${svc.weak_creds.protocol || ""} ${svc.weak_creds.username}:${svc.weak_creds.password}`)}</div>`;
   }
@@ -869,5 +712,5 @@ function onDetailsClick(e) {
 }
 
 function escapeHtml(str) {
-  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

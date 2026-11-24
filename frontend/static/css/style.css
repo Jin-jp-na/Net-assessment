@@ -1,20 +1,28 @@
 body {
     font-family: Arial, sans-serif;
-    max-width: 900px;
+    max-width: 700px;
     margin: 0 auto;
     padding: 20px;
 }
 
-input[type="text"] {
-    padding: 6px;
-    margin-right: 8px;
-    width: 280px;
+label {
+    display: block;
+    margin-bottom: 4px;
 }
 
+input,
 button {
-    padding: 6px 12px;
+    padding: 6px;
 }
 
-header h1 {
-    margin-bottom: 0.2em;
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th,
+td {
+    border: 1px solid #ccc;
+    padding: 6px;
+    text-align: left;
 }

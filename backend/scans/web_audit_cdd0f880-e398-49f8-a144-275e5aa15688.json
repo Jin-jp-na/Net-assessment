@@ -1,0 +1,8 @@
+{
+  "url": "http://192.168.56.1",
+  "http": {},
+  "tls": {},
+  "technologies": [],
+  "checks": [],
+  "error": "HTTPConnectionPool(host='192.168.56.1', port=80): Max retries exceeded with url: / (Caused by NewConnectionError(\"HTTPConnection(host='192.168.56.1', port=80): Failed to establish a new connection: [WinError 10061] No connection could be made because the target machine actively refused it\"))"
+}

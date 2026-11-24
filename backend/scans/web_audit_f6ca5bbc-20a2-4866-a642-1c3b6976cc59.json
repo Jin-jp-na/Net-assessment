@@ -1,0 +1,8 @@
+{
+  "url": "http://192.168.1.10",
+  "http": {},
+  "tls": {},
+  "technologies": [],
+  "checks": [],
+  "error": "HTTPConnectionPool(host='192.168.1.10', port=80): Max retries exceeded with url: / (Caused by NewConnectionError(\"HTTPConnection(host='192.168.1.10', port=80): Failed to establish a new connection: [WinError 10013] An attempt was made to access a socket in a way forbidden by its access permissions\"))"
+}

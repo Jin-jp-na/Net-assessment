@@ -1,0 +1,4 @@
+{
+  "summary": "Gobuster completed with warnings; partial results are available.",
+  "detail": "2026/11/24 10:25:07 error on running gobuster on https://testphp.vulnweb.com/: unable to connect to https://testphp.vulnweb.com/: Get \"https://testphp.vulnweb.com/\": dial tcp 44.228.249.3:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions."
+}

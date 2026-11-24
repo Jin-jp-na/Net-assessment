@@ -27,20 +27,8 @@ def exploitability_risk(nvd_block: Dict[str, Any]) -> int:
     if not cves:
         return 0
 
-    max_sev = "LOW"
-    order = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
-    for c in cves:
-        sev = (c.get("severity") or "").upper()
-        if sev in order and order.index(sev) > order.index(max_sev):
-            max_sev = sev
-
-    if max_sev == "CRITICAL":
-        return 25
-    if max_sev == "HIGH":
-        return 20
-    if max_sev == "MEDIUM":
-        return 10
-    return 5  # LOW
+    points = {"CRITICAL": 25, "HIGH": 20, "MEDIUM": 10}
+    return max(points.get((cve.get("severity") or "").upper(), 5) for cve in cves)
 
 
 def privilege_risk(service: Dict[str, Any]) -> int:
@@ -61,10 +49,6 @@ def heuristic_credential_risk(service: Dict[str, Any]) -> int:
 
 
 def confirmed_credential_risk(service: Dict[str, Any]) -> int:
-    """
-    If later you add real testing (weak_creds module) store result as:
-    service["weak_creds"] = {"found": True/False}
-    """
     weak = (service.get("weak_creds") or {}).get("found", False)
     return 25 if weak else 0
 
@@ -85,16 +69,15 @@ def clamp(score: int) -> int:
 def pcvp_score_for_service(service: Dict[str, Any], exposure: str) -> Dict[str, Any]:
     nvd_block = service.get("nvd", {}) or {}
 
-    b = base_risk(service)
-    e = exposure_risk(exposure)
-    ex = exploitability_risk(nvd_block)
-    p = privilege_risk(service)
-    cred_h = heuristic_credential_risk(service)
-    cred_c = confirmed_credential_risk(service)
-    path = attack_path_risk(service, exposure)
-
-    total = b + e + ex + p + cred_h + cred_c + path
-    total = clamp(total)
+    base = base_risk(service)
+    exposure_points = exposure_risk(exposure)
+    cve_points = exploitability_risk(nvd_block)
+    privilege = privilege_risk(service)
+    common_credentials = heuristic_credential_risk(service)
+    confirmed_credentials = confirmed_credential_risk(service)
+    entry_point = attack_path_risk(service, exposure)
+    total = clamp(base + exposure_points + cve_points + privilege + common_credentials
+                  + confirmed_credentials + entry_point)
 
     # Map numeric score to a label
     if total >= 80:
@@ -109,18 +92,18 @@ def pcvp_score_for_service(service: Dict[str, Any], exposure: str) -> Dict[str, 
         level = "informational"
 
     reasons: List[str] = [
-        f"Base service/port risk: {b}",
-        f"Exposure ({exposure}): {e}",
+        f"Base service/port risk: {base}",
+        f"Exposure ({exposure}): {exposure_points}",
     ]
-    if ex > 0:
-        reasons.append(f"Exploitability from NVD CVEs: {ex}")
-    if p > 0:
-        reasons.append(f"Privilege impact: {p}")
-    if cred_h > 0:
+    if cve_points:
+        reasons.append(f"Exploitability from NVD CVEs: {cve_points}")
+    if privilege:
+        reasons.append(f"Privilege impact: {privilege}")
+    if common_credentials:
         reasons.append("Service type commonly affected by weak/default credentials.")
-    if cred_c > 0:
+    if confirmed_credentials:
         reasons.append("Confirmed weak/default credentials detected.")
-    if path > 0:
+    if entry_point:
         reasons.append("Service is a likely entry point in an attack path.")
 
     return {

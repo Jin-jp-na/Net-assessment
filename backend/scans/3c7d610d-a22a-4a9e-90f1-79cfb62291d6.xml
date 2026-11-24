@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="file:///C:/Program Files (x86)/Nmap/nmap.xsl" type="text/xsl"?>
+<!-- Nmap 7.992 scan initiated Mon Nov 23 23:17:59 2026 as: &quot;C:\\Program Files (x86)\\Nmap\\nmap.exe&quot; -T4 -Pn -p 8787 -oX &quot;D:\\original security project\\backend\\scans\\3c7d610d-a22a-4a9e-90f1-79cfb62291d6.xml.tmp&quot; 127.0.0.1 -->
+<nmaprun scanner="nmap" args="&quot;C:\\Program Files (x86)\\Nmap\\nmap.exe&quot; -T4 -Pn -p 8787 -oX &quot;D:\\original security project\\backend\\scans\\3c7d610d-a22a-4a9e-90f1-79cfb62291d6.xml.tmp&quot; 127.0.0.1" start="1795490279" startstr="Mon Nov 23 23:17:59 2026" version="7.992" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="1" services="8787"/>
+<verbose level="0"/>
+<debugging level="0"/>
+<host starttime="1795490279" endtime="1795490279"><status state="up" reason="user-set" reason_ttl="0"/>
+<address addr="127.0.0.1" addrtype="ipv4"/>
+<hostnames>
+<hostname name="localhost" type="PTR"/>
+</hostnames>
+<ports><port protocol="tcp" portid="8787"><state state="open" reason="syn-ack" reason_ttl="128"/><service name="msgsrvr" method="table" conf="3"/></port>
+</ports>
+<times srtt="1000" rttvar="5000" to="100000"/>
+</host>
+<runstats><finished time="1795490279" timestr="Mon Nov 23 23:17:59 2026" summary="Nmap done at Mon Nov 23 23:17:59 2026; 1 IP address (1 host up) scanned in 0.52 seconds" elapsed="0.52" exit="success"/><hosts up="1" down="0" total="1"/>
+</runstats>
+</nmaprun>

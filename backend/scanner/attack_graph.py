@@ -15,22 +15,17 @@ def build_attack_graph(parsed_scan: Dict[str, Any]) -> Dict[str, Any]:
     node_ids = set()
     edge_keys = set()
 
-    def add_node(n: Dict[str, Any]) -> None:
-        nid = n.get("id")
-        if not nid or nid in node_ids:
-            return
-        node_ids.add(nid)
-        nodes.append(n)
+    def add_node(node: Dict[str, Any]) -> None:
+        node_id = node["id"]
+        if node_id not in node_ids:
+            node_ids.add(node_id)
+            nodes.append(node)
 
-    def add_edge(e: Dict[str, Any]) -> None:
-        k = (e.get("from"), e.get("to"), e.get("relation"))
-        if None in k or k in edge_keys:
-            return
-        edge_keys.add(k)
-        edges.append(e)
-
-    def host_id(ip: str) -> str:
-        return f"host:{ip}"
+    def add_edge(source: str, target: str, relation: str) -> None:
+        key = (source, target, relation)
+        if key not in edge_keys:
+            edge_keys.add(key)
+            edges.append({"from": source, "to": target, "relation": relation})
 
     def service_id(ip: str, svc: Dict[str, Any]) -> str:
         return f"svc:{ip}:{svc.get('port')}/{svc.get('protocol', 'tcp')}"
@@ -41,7 +36,8 @@ def build_attack_graph(parsed_scan: Dict[str, Any]) -> Dict[str, Any]:
         if not ip:
             continue
 
-        add_node({"id": host_id(ip), "type": "host", "ip": ip})
+        host_node_id = f"host:{ip}"
+        add_node({"id": host_node_id, "type": "host", "ip": ip})
 
         for svc in host.get("services", []):
             sid = service_id(ip, svc)
@@ -57,7 +53,7 @@ def build_attack_graph(parsed_scan: Dict[str, Any]) -> Dict[str, Any]:
                 "pcvp_level": svc.get("pcvp_level"),
             })
 
-            add_edge({"from": host_id(ip), "to": sid, "relation": "runs"})
+            add_edge(host_node_id, sid, "runs")
 
             # ✅ Use robust CVE extraction
             for c in _extract_cves(svc):
@@ -73,7 +69,7 @@ def build_attack_graph(parsed_scan: Dict[str, Any]) -> Dict[str, Any]:
                     "severity": c.get("severity"),
                     "cvss": c.get("cvss") or c.get("score"),
                 })
-                add_edge({"from": sid, "to": cid, "relation": "has_vulnerability"})
+                add_edge(sid, cid, "has_vulnerability")
 
     high_services: List[Tuple[Dict[str, Any], Dict[str, Any]]] = [
         (host, svc) for host in hosts
@@ -92,6 +88,6 @@ def build_attack_graph(parsed_scan: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             sid_b = service_id(ip_b, svc_b)
 
-            add_edge({"from": sid_a, "to": sid_b, "relation": "possible_chain"})
+            add_edge(sid_a, sid_b, "possible_chain")
 
     return {"nodes": nodes, "edges": edges}

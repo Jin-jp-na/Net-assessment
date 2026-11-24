@@ -1,0 +1,4 @@
+{
+  "summary": "Gobuster completed with warnings; partial results are available.",
+  "detail": "2026/11/23 23:15:21 error on running gobuster on https://scanme.nmap.org/: unable to connect to https://scanme.nmap.org/: Get \"https://scanme.nmap.org/\": dial tcp 45.33.32.156:443: connectex: An attempt was made to access a socket in a way forbidden by its access permissions."
+}

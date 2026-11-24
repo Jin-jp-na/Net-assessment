@@ -1,0 +1,57 @@
+{
+  "url": "http://127.0.0.1:8787",
+  "http": {
+    "status": 200,
+    "final_url": "http://127.0.0.1:8787/",
+    "headers": {
+      "date": "Tue, 24 Nov 2026 03:18:20 GMT",
+      "server": "uvicorn",
+      "content-length": "15255",
+      "content-type": "text/html; charset=utf-8"
+    }
+  },
+  "tls": {},
+  "technologies": [
+    {
+      "name": "Server",
+      "evidence": "uvicorn"
+    }
+  ],
+  "checks": [
+    {
+      "name": "HSTS",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Content-Security-Policy",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "X-Content-Type-Options",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "X-Frame-Options",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Referrer-Policy",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Permissions-Policy",
+      "status": "missing",
+      "detail": "Security header is missing"
+    },
+    {
+      "name": "Server disclosure",
+      "status": "review",
+      "detail": "Server header is exposed: uvicorn"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+docs                 (Status: 200) [Size: 963]
+health               (Status: 200) [Size: 93]
+scan                 (Status: 405) [Size: 31]
+static               (Status: 307) [Size: 0] [--> http://127.0.0.1:8787/static/]

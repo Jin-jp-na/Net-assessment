@@ -1,0 +1,4 @@
+{
+  "summary": "Gobuster completed with warnings; partial results are available.",
+  "detail": "2026/11/24 10:24:05 error on running gobuster on https://192.168.56.1/: unable to connect to https://192.168.56.1/: Get \"https://192.168.56.1/\": dial tcp 192.168.56.1:443: connectex: No connection could be made because the target machine actively refused it."
+}

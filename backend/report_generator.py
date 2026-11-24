@@ -16,10 +16,21 @@ from reportlab.platypus import (
     ListItem,
 )
 
-def _safe(v: Any) -> str:
-    if v is None:
-        return ""
-    return str(v)
+def _safe(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _findings_table(rows, widths):
+    table = Table(rows, repeatRows=1, colWidths=widths)
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
+        ("FONT", (0, 0), (-1, -1), "Helvetica", 8),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return table
+
 
 def _page_footer(canvas, doc):
     canvas.saveState()
@@ -67,23 +78,22 @@ def build_pdf_report(
     story.append(Paragraph(f"<b>Generated:</b> {datetime.now(timezone.utc).isoformat()}", body))
     story.append(Spacer(1, 0.6 * cm))
 
-    # Flatten services
-    hosts = parsed.get("hosts", []) or []
-    services_flat: List[Dict[str, Any]] = []
-    for h in hosts:
-        for s in (h.get("services") or []):
-            services_flat.append({**s, "ip": h.get("ip")})
-
-    critical = sum(1 for s in services_flat if (s.get("pcvp_level") == "critical"))
-    high = sum(1 for s in services_flat if (s.get("pcvp_level") == "high"))
-    weak = sum(1 for s in services_flat if (s.get("weak_creds") or {}).get("found"))
+    hosts = parsed.get("hosts") or []
+    services = [
+        {**service, "ip": host.get("ip")}
+        for host in hosts
+        for service in host.get("services") or []
+    ]
+    critical = sum(service.get("pcvp_level") == "critical" for service in services)
+    high = sum(service.get("pcvp_level") == "high" for service in services)
+    weak = sum(bool((service.get("weak_creds") or {}).get("found")) for service in services)
 
     # Executive summary
     story.append(Paragraph("Executive Summary", h2))
     summary_table = Table(
         [
             ["Hosts discovered", str(len(hosts))],
-            ["Services detected", str(len(services_flat))],
+            ["Services detected", str(len(services))],
             ["Critical / High services", f"{critical} / {high}"],
             ["Weak credentials findings", str(weak)],
         ],
@@ -152,12 +162,12 @@ def build_pdf_report(
 
     # Findings table
     story.append(Paragraph("Prioritized Findings", h2))
-    services_flat.sort(key=lambda s: (s.get("pcvp_score") or 0), reverse=True)
+    services.sort(key=lambda s: (s.get("pcvp_score") or 0), reverse=True)
 
     data = [
         ["Host", "Port/Proto", "Service", "Product", "RiskLens", "Weak Creds", "Top CVEs"]
     ]
-    for s in services_flat[:50]:
+    for s in services[:50]:
         wc = s.get("weak_creds") or {}
         weak_text = (
             f"{_safe(wc.get('protocol'))} {_safe(wc.get('username'))}:{_safe(wc.get('password'))}"
@@ -184,23 +194,7 @@ def build_pdf_report(
             ]
         )
 
-    table = Table(
-        data,
-        repeatRows=1,
-        colWidths=[3 * cm, 2.5 * cm, 2.5 * cm, 4 * cm, 3 * cm, 4 * cm, 4 * cm],
-    )
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
-                ("FONT", (0, 0), (-1, -1), "Helvetica", 8),
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ]
-        )
-    )
-    story.append(table)
+    story.append(_findings_table(data, [3 * cm, 2.5 * cm, 2.5 * cm, 4 * cm, 3 * cm, 4 * cm, 4 * cm]))
     if findings:
         story.append(Spacer(1, 0.7 * cm))
         story.append(Paragraph("Evidence-Based Findings", h2))
@@ -212,15 +206,7 @@ def build_pdf_report(
                 _safe(finding.get("asset")),
                 _safe(finding.get("source")),
             ])
-        findings_table = Table(finding_data, repeatRows=1, colWidths=[2.2 * cm, 7 * cm, 4 * cm, 3 * cm])
-        findings_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
-            ("FONT", (0, 0), (-1, -1), "Helvetica", 8),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ]))
-        story.append(findings_table)
+        story.append(_findings_table(finding_data, [2.2 * cm, 7 * cm, 4 * cm, 3 * cm]))
 
     doc.build(story, onFirstPage=_page_footer, onLaterPages=_page_footer)
     return buf.getvalue()
