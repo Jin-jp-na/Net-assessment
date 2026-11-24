@@ -391,7 +391,7 @@ def _normalize_webscan_error(err: str) -> str:
     return f"Web scan could not complete: {e[:500]}"
 
 
-def run_web_security_assessment(url: str, *, headers_only: bool = False) -> dict:
+def run_web_security_assessment(url: str) -> dict:
     parsed_url = urlparse(url)
     if parsed_url.scheme not in ("http", "https") or not parsed_url.hostname:
         return {"url": url, "error": "Unsupported web URL."}
@@ -407,17 +407,13 @@ def run_web_security_assessment(url: str, *, headers_only: bool = False) -> dict
     response = None
     request_error = None
     try:
-        if headers_only:
-            response = requests.head(url, timeout=5, allow_redirects=False)
-        else:
-            response = requests.get(url, timeout=15, allow_redirects=True, verify=True)
+        response = requests.get(url, timeout=15, allow_redirects=True, verify=True)
     except requests.exceptions.SSLError as exc:
         request_error = str(exc)
-        if not headers_only:
-            try:
-                response = requests.get(url, timeout=15, allow_redirects=True, verify=False)
-            except requests.RequestException as fallback_exc:
-                request_error = str(fallback_exc)
+        try:
+            response = requests.get(url, timeout=15, allow_redirects=True, verify=False)
+        except requests.RequestException as fallback_exc:
+            request_error = str(fallback_exc)
     except requests.RequestException as exc:
         request_error = str(exc)
 
@@ -428,7 +424,7 @@ def run_web_security_assessment(url: str, *, headers_only: bool = False) -> dict
             "final_url": response.url,
             "headers": dict(response.headers),
         }
-        body_sample = "" if headers_only else response.text[:200000].lower()
+        body_sample = response.text[:200000].lower()
         technology_signatures = {
             "Server": headers.get("server"),
             "Powered-By": headers.get("x-powered-by"),
@@ -474,7 +470,7 @@ def run_web_security_assessment(url: str, *, headers_only: bool = False) -> dict
     if parsed_url.scheme == "https" and parsed_url.hostname:
         try:
             port = parsed_url.port or 443
-            context = ssl.create_default_context() if headers_only else ssl._create_unverified_context()
+            context = ssl._create_unverified_context()
             with socket.create_connection((parsed_url.hostname, port), timeout=10) as raw_socket:
                 with context.wrap_socket(raw_socket, server_hostname=parsed_url.hostname) as tls_socket:
                     certificate = tls_socket.getpeercert() or {}
@@ -490,26 +486,6 @@ def run_web_security_assessment(url: str, *, headers_only: bool = False) -> dict
             result["tls"] = {"error": str(exc)}
 
     return result
-
-
-def run_web_headers_scan(scan_id: str, host: str, ports: Optional[str], url: str) -> None:
-    status = scan_status_store.get(scan_id)
-    if status is None:
-        return
-    status.status = "running"
-    status.message = "Checking HTTP headers..."
-    _save_scan_status_store()
-    try:
-        assessment = run_web_security_assessment(url, headers_only=True)
-        output = SCANS_DIR / f"web_audit_{scan_id}.json"
-        output.write_text(json.dumps(assessment, indent=2), encoding="utf-8")
-    except OSError:
-        status.status = "failed"
-        status.message = "Web assessment could not save its results."
-        status.completed_at = _utc_now()
-        _save_scan_status_store()
-        return
-    run_nmap_scan(scan_id, host, ports)
 
 
 @asynccontextmanager
@@ -604,10 +580,9 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=400, detail="Target is required")
 
     profile = request.profile
-    if profile not in {"quick", "services", "web-headers", "overview", "standard", "vulnerability", "web", "full"}:
+    if profile not in {"quick", "services", "standard", "vulnerability", "web", "full"}:
         profile = "standard"
-    checks_web_headers = profile in {"web-headers", "overview"}
-    discovery_only = checks_web_headers or profile in {"quick", "services"}
+    discovery_only = profile in {"quick", "services"}
     ports = (request.ports or "").strip() or None
     if not discovery_only and target.endswith(".0"):
         try:
@@ -644,14 +619,6 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
         ):
             raise HTTPException(status_code=400, detail="Port must be between 1 and 65535")
     ports = ports or implied_port
-    if checks_web_headers:
-        scheme = scheme or "http"
-        web_port = ports or ("443" if scheme == "https" else "80")
-        if not re.fullmatch(r"[0-9]{1,5}", web_port) or not 1 <= int(web_port) <= 65535:
-            raise HTTPException(status_code=400, detail="Web assessment requires a single valid port")
-        if profile == "web-headers":
-            ports = web_port
-        web_url = f"{scheme}://{host}:{web_port}"
 
     exposure = request.exposure or "auto"
     scan_id = str(uuid4())
@@ -670,13 +637,10 @@ def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     scan_status_store[scan_id] = status
     _save_scan_status_store()
 
-    if checks_web_headers:
-        background_tasks.add_task(run_web_headers_scan, scan_id, host, ports, web_url)
-    else:
-        background_tasks.add_task(run_nmap_scan, scan_id=scan_id, target=host, ports=ports)
-        if not discovery_only:
-            netloc = f"{host}:{ports}" if ports and ports.isdigit() else host
-            background_tasks.add_task(run_gobuster_scan, scan_id, f"{scheme or 'http'}://{netloc}")
+    background_tasks.add_task(run_nmap_scan, scan_id=scan_id, target=host, ports=ports)
+    if not discovery_only:
+        netloc = f"{host}:{ports}" if ports and ports.isdigit() else host
+        background_tasks.add_task(run_gobuster_scan, scan_id, f"{scheme or 'http'}://{netloc}")
 
     return status
 
@@ -942,12 +906,9 @@ def enrich_scan_data(scan_id: str) -> tuple[dict, Optional[dict]]:
             service["nvd"] = enrich_service_with_nvd(service.get("product"), service.get("version"))
             score = pcvp_score_for_service(service, exposure)
             service.update(score)
-    return parsed, read_saved_web_audit(scan_id)
-
-
-def read_saved_web_audit(scan_id: str) -> Optional[dict]:
     audit_path = SCANS_DIR / f"web_audit_{scan_id}.json"
-    return json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else None
+    web_audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else None
+    return parsed, web_audit
 
 
 @app.get("/scan/{scan_id}/findings")
@@ -1251,6 +1212,8 @@ def download_report(scan_id: str):
         if scan_status and scan_status.exposure_effective
         else infer_exposure_from_target(scan_status.target) if scan_status else "external"
     )
+    
+
 
 
     for host in parsed.get("hosts", []):
@@ -1261,7 +1224,7 @@ def download_report(scan_id: str):
             svc.update(pcvp)
 
     attack_graph = build_attack_graph(parsed)
-    findings = build_findings(parsed, read_saved_web_audit(scan_id))
+    findings = build_findings(parsed)
 
     pdf_bytes = build_pdf_report(
         scan_id=scan_id,
