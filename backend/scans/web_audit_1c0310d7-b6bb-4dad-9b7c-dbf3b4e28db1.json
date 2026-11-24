@@ -1,0 +1,8 @@
+{
+  "url": "http://8.8.8.8",
+  "http": {},
+  "tls": {},
+  "technologies": [],
+  "checks": [],
+  "error": "HTTPConnectionPool(host='8.8.8.8', port=80): Max retries exceeded with url: / (Caused by ConnectTimeoutError(<HTTPConnection(host='8.8.8.8', port=80) at 0x2ec600b8050>, 'Connection to 8.8.8.8 timed out. (connect timeout=15)'))"
+}

@@ -1,0 +1,4 @@
+{
+  "summary": "Gobuster completed with warnings; partial results are available.",
+  "detail": "2026/11/18 18:39:48 the server returns a status code that matches the provided options for non existing urls. https://8.8.8.8/3664b6cc-767e-476f-8fc8-0085082cd53e => 302 (redirect to https://dns.google/3664b6cc-767e-476f-8fc8-0085082cd53e) (Length: 252). Please exclude the response length or the status code or set the wildcard option.. To continue please exclude the status code or the length"
+}

@@ -22,7 +22,6 @@ from pydantic import BaseModel
 from backend.scanner.pcvp_scoring import pcvp_score_for_service
 from backend.scanner.attack_graph import build_attack_graph
 from backend.scanner.weak_creds import annotate_services_with_weak_creds
-from backend.llm_remediation import generate_remediation_openai
 from starlette.responses import StreamingResponse, Response
 from backend.report_generator import build_pdf_report
 from io import BytesIO
@@ -44,7 +43,7 @@ def infer_exposure_from_target(target: str) -> str:
         return "external"
 
 NMAP_PATH = r"C:\Program Files (x86)\Nmap\nmap.exe"
-IPSCAN_PATH = r"C:\Tools\AngryIP\ipscan.exe"  # ✅ add here
+IPSCAN_PATH = r"C:\Users\jinzz\AppData\Local\Programs\Angry IP Scanner\ipscan.exe"
 
 BASE_DIR = Path(__file__).resolve().parent
 SCANS_DIR = BASE_DIR / "scans"
@@ -83,6 +82,7 @@ def parse_target_and_port(raw: str) -> Tuple[str, Optional[str], Optional[str]]:
 GOBUSTER_EXE = BASE_DIR.parent / "gobuster_Windows_x86_64" / "gobuster.exe"
 GOBUSTER_WORDLIST = BASE_DIR.parent / "wordlists" / "common.txt"
 NMAP_SCRIPT_SET = "vuln"
+NMAP_TIMEOUT_SECONDS = 600
 
 BOOT_ID = str(uuid4())
 
@@ -120,13 +120,6 @@ class WebScanStatus(BaseModel):
     status: str
     message: str
 
-class RemediationRequest(BaseModel):
-    scan_id: str
-    ip: str
-    port: int
-    protocol: str = "tcp"
-
-
 scan_status_store: dict[str, ScanStatus] = {}
 
 
@@ -143,7 +136,14 @@ def _load_scan_status_store() -> None:
             status = ScanStatus.model_validate(raw_status)
             if not status.created_at:
                 status.created_at = _utc_now()
+            if status.status not in {"completed", "failed"}:
+                status.status = "failed"
+                status.message = "Scan interrupted by a backend restart. Start a new scan."
+                status.completed_at = _utc_now()
+                if status.gobuster_status in {"pending", "running"}:
+                    status.gobuster_status = "skipped"
             scan_status_store[scan_id] = status
+        _save_scan_status_store()
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"[SCAN STORE] Failed to load scan status store: {exc}")
 
@@ -217,6 +217,21 @@ def run_angry_ip_discovery(scan_id: str, subnet: str) -> list[str]:
     return sorted(set(alive), key=lambda x: tuple(int(p) for p in x.split(".")))
 
 
+def _run_nmap_command(cmd: list[str]) -> None:
+    # Share one deadline with the retry so fallback cannot double the limit.
+    deadline = time.monotonic() + NMAP_TIMEOUT_SECONDS
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=NMAP_TIMEOUT_SECONDS)
+    except subprocess.CalledProcessError:
+        if "-O" not in cmd:
+            raise
+        fallback = [arg for arg in cmd if arg not in ("-O", "--osscan-guess")]
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(cmd, NMAP_TIMEOUT_SECONDS)
+        subprocess.run(fallback, check=True, capture_output=True, timeout=remaining)
+
+
 def run_nmap_scan_multi(scan_id: str, targets: List[str], ports: Optional[str] = None) -> None:
     """
     Runs ONE Nmap scan for multiple targets and writes:
@@ -254,13 +269,7 @@ def run_nmap_scan_multi(scan_id: str, targets: List[str], ports: Optional[str] =
         cmd += ["-oX", str(tmp_file)]
         cmd += list(targets)
 
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            # OS detection may require an elevated Nmap installation. Preserve
-            # the service/vulnerability scan if Windows blocks raw probes.
-            fallback = [arg for arg in cmd if arg not in ("-O", "--osscan-guess")]
-            subprocess.run(fallback, check=True, capture_output=True)
+        _run_nmap_command(cmd)
 
         # ✅ Atomic replace: endpoints will only see a complete XML
         if not tmp_file.exists() or tmp_file.stat().st_size < 100:
@@ -271,6 +280,10 @@ def run_nmap_scan_multi(scan_id: str, targets: List[str], ports: Optional[str] =
         status.status = "completed"
         status.message = f"CIDR scan completed. Alive hosts scanned: {len(targets)}"
 
+    except subprocess.TimeoutExpired:
+        status.status = "failed"
+        status.message = f"Nmap timed out after {NMAP_TIMEOUT_SECONDS} seconds. Try fewer hosts or ports."
+        status.completed_at = _utc_now()
     except subprocess.CalledProcessError as e:
         err_msg = ""
         try:
@@ -520,9 +533,12 @@ def run_nmap_scan(scan_id: str, target: str, ports: Optional[str] = None):
         return
 
     status.status = "running"
+    status.message = "Nmap scan in progress..."
     scan_status_store[scan_id] = status
+    _save_scan_status_store()
 
     output_file = SCANS_DIR / f"{scan_id}.xml"
+    tmp_file = SCANS_DIR / f"{scan_id}.xml.tmp"
 
     try:
         profile = status.profile
@@ -540,17 +556,20 @@ def run_nmap_scan(scan_id: str, target: str, ports: Optional[str] = None):
         if ports:
             cmd += ["-p", ports]  # ✅ only scan specified ports
 
-        cmd += ["-oX", str(output_file), target]
+        cmd += ["-oX", str(tmp_file), target]
 
-        try:
-            subprocess.run(cmd, check=True, capture_output=True)
-        except subprocess.CalledProcessError:
-            fallback = [arg for arg in cmd if arg not in ("-O", "--osscan-guess")]
-            subprocess.run(fallback, check=True, capture_output=True)
+        _run_nmap_command(cmd)
+        if not tmp_file.exists() or tmp_file.stat().st_size < 100:
+            raise RuntimeError("Nmap did not produce a valid XML output file.")
+        tmp_file.replace(output_file)
 
         status.status = "nmap_done"
         status.message = "Nmap completed. Waiting for Gobuster..."
 
+    except subprocess.TimeoutExpired:
+        status.status = "failed"
+        status.message = f"Nmap timed out after {NMAP_TIMEOUT_SECONDS} seconds. Try fewer ports."
+        status.completed_at = _utc_now()
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.decode(errors="ignore") if e.stderr else str(e)
         status.status = "failed"
@@ -561,6 +580,7 @@ def run_nmap_scan(scan_id: str, target: str, ports: Optional[str] = None):
     finally:
         scan_status_store[scan_id] = status
         _save_scan_status_store()
+        tmp_file.unlink(missing_ok=True)
 
 @app.post("/scan", response_model=ScanStatus)
 def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
@@ -655,6 +675,10 @@ def get_scan_status(scan_id: str):
     if not status:
         raise HTTPException(status_code=404, detail="Scan not found")
 
+    # The worker owns the active stage. File size does not prove Nmap exited.
+    if status.status not in {"nmap_done"}:
+        return status
+
     xml_path = SCANS_DIR / f"{scan_id}.xml"
     done_path = SCANS_DIR / f"gobuster_{scan_id}.done"
 
@@ -681,12 +705,6 @@ def get_scan_status(scan_id: str):
         status.gobuster_status = "running"
         if status.status not in ("failed",):
             status.message = "Nmap completed. Waiting for Gobuster..."
-        scan_status_store[scan_id] = status
-
-    elif not nmap_done:
-        if status.status not in ("failed",):
-            status.status = "running"
-            status.message = "Nmap scan in progress..."
         scan_status_store[scan_id] = status
 
     return status
@@ -1272,52 +1290,6 @@ def get_alive_hosts(scan_id: str):
                 ],
             })
     return {"scan_id": scan_id, "hosts": hosts}
-
-@app.post("/scan/{scan_id}/remediation")
-def get_llm_remediation(scan_id: str, req: RemediationRequest):
-    xml_path = SCANS_DIR / f"{scan_id}.xml"
-    if not xml_path.exists():
-        raise HTTPException(status_code=404, detail="Scan output not found yet")
-
-    parsed = parse_nmap_xml(xml_path)
-
-    scan_status = scan_status_store.get(scan_id)
-
-    exposure_effective = (
-        scan_status.exposure_effective
-        if scan_status and scan_status.exposure_effective
-        else infer_exposure_from_target(scan_status.target) if scan_status else "external"
-    )
-
-    annotate_services_with_weak_creds(parsed)
-
-    target_svc = None
-    for host in parsed.get("hosts", []):
-        if host.get("ip") != req.ip:
-            continue
-        for svc in host.get("services", []):
-            if svc.get("port") == req.port and (svc.get("protocol") or "tcp") == req.protocol:
-                svc["ip"] = host.get("ip")
-
-                svc["nvd"] = enrich_service_with_nvd(svc.get("product"), svc.get("version"))
-                pcvp = pcvp_score_for_service(svc, exposure_effective)
-                svc["pcvp_score"] = pcvp["pcvp_score"]
-                svc["pcvp_level"] = pcvp["pcvp_level"]
-                svc["pcvp_reasons"] = pcvp["pcvp_reasons"]
-
-                target_svc = svc
-                break
-
-    if not target_svc:
-        raise HTTPException(status_code=404, detail="Service not found for remediation generation")
-
-    remediation = generate_remediation_openai(target_svc, exposure_effective)
-    return {
-        "scan_id": scan_id,
-        "exposure": scan_status.exposure if scan_status else "auto",
-        "service": target_svc,
-        "remediation": remediation,
-    }
 
 @app.get("/scan/{scan_id}/report.pdf")
 def download_report(scan_id: str):

@@ -37,5 +37,83 @@
     "description": null,
     "created_at": "2026-10-05T18:36:19.113227+00:00",
     "completed_at": "2026-10-05T18:37:22.304478+00:00"
+  },
+  "4fcef25e-4541-492c-ad6d-1601cd5f79fc": {
+    "scan_id": "4fcef25e-4541-492c-ad6d-1601cd5f79fc",
+    "target": "192.168.1.0/24",
+    "status": "failed",
+    "message": "Scan interrupted by a backend restart. Start a new scan.",
+    "exposure": "auto",
+    "exposure_effective": "internal",
+    "gobuster_status": "skipped",
+    "profile": "standard",
+    "description": null,
+    "created_at": "2026-11-18T22:29:37.823273+00:00",
+    "completed_at": "2026-11-18T22:37:56.165842+00:00"
+  },
+  "1c0310d7-b6bb-4dad-9b7c-dbf3b4e28db1": {
+    "scan_id": "1c0310d7-b6bb-4dad-9b7c-dbf3b4e28db1",
+    "target": "8.8.8.8",
+    "status": "completed",
+    "message": "Scan fully completed.",
+    "exposure": "auto",
+    "exposure_effective": "external",
+    "gobuster_status": "completed",
+    "profile": "standard",
+    "description": null,
+    "created_at": "2026-11-18T22:38:05.853755+00:00",
+    "completed_at": "2026-11-18T22:39:50.888965+00:00"
+  },
+  "cc7b2ef3-03c1-4e7c-a43b-d78a6baefd9e": {
+    "scan_id": "cc7b2ef3-03c1-4e7c-a43b-d78a6baefd9e",
+    "target": "8.8.8.8",
+    "status": "completed",
+    "message": "Scan fully completed.",
+    "exposure": "auto",
+    "exposure_effective": "external",
+    "gobuster_status": "skipped",
+    "profile": "quick",
+    "description": null,
+    "created_at": "2026-11-18T22:46:08.114250+00:00",
+    "completed_at": "2026-11-18T22:46:17.140953+00:00"
+  },
+  "0213fc16-39fc-40ec-8117-3fa988151f90": {
+    "scan_id": "0213fc16-39fc-40ec-8117-3fa988151f90",
+    "target": "192.168.56.101",
+    "status": "completed",
+    "message": "Scan fully completed.",
+    "exposure": "auto",
+    "exposure_effective": "internal",
+    "gobuster_status": "skipped",
+    "profile": "quick",
+    "description": null,
+    "created_at": "2026-11-18T22:51:35.913703+00:00",
+    "completed_at": "2026-11-18T22:51:38.949339+00:00"
+  },
+  "06b3099d-9972-4f52-ad60-3f72d7423019": {
+    "scan_id": "06b3099d-9972-4f52-ad60-3f72d7423019",
+    "target": "131.162.0.0/16",
+    "status": "failed",
+    "message": "CIDR scan failed: Angry IP Scanner failed: WARNING: A restricted method in java.lang.System has been called\nWARNING: java.lang.System::loadLibrary has been called by org.eclipse.swt.internal.Library in an unnamed module (file:/C:/Users/jinzz/AppData/Local/Programs/Angry%20IP%20Scanner/ipscan.exe)\nWARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module\nWARNING: Restricted methods will be blocked in a future release unless native access is enabled",
+    "exposure": "auto",
+    "exposure_effective": "internal",
+    "gobuster_status": "skipped",
+    "profile": "quick",
+    "description": null,
+    "created_at": "2026-11-18T22:52:00.545514+00:00",
+    "completed_at": null
+  },
+  "c1f79ffd-a2e4-4e60-b4be-23b4f6d61d0f": {
+    "scan_id": "c1f79ffd-a2e4-4e60-b4be-23b4f6d61d0f",
+    "target": "scanme.nmap.org",
+    "status": "completed",
+    "message": "Scan fully completed.",
+    "exposure": "auto",
+    "exposure_effective": "external",
+    "gobuster_status": "completed",
+    "profile": "standard",
+    "description": null,
+    "created_at": "2026-11-18T22:56:34.562944+00:00",
+    "completed_at": "2026-11-18T22:58:07.830068+00:00"
   }
 }

@@ -16,7 +16,7 @@ Only scan systems that you own or have explicit permission to assess.
 - Angry IP Scanner, required only for CIDR/subnet scans
 - A modern browser
 - Internet access for NVD lookups, the CDN-loaded frontend libraries, and
-  optional Gemini remediation
+  vulnerability enrichment
 
 The repository contains a Windows Gobuster executable at
 `gobuster_Windows_x86_64\gobuster.exe` and its wordlist at
@@ -27,7 +27,7 @@ The repository contains a Windows Gobuster executable at
 Open PowerShell and run these commands from the project directory:
 
 ```powershell
-cd F:\kale\PCVP
+cd "File location"
 
 # Create a fresh environment. Do not use the checked-in venv; it belongs to
 # the computer on which the project was originally developed.
@@ -84,14 +84,11 @@ The first two commands should return `True`.
 The application works without these keys, but some features are reduced:
 
 - `NVD_API_KEY` increases the NVD API request allowance.
-- `GEMINI_API_KEY` enables LLM-generated remediation in the service details
-  dialog. Without it, the UI displays an explanatory fallback.
 
 Set keys only in the current PowerShell session:
 
 ```powershell
 $env:NVD_API_KEY = 'your-nvd-key'
-$env:GEMINI_API_KEY = 'your-gemini-key'
 ```
 
 Do not commit keys to the repository. To make them persistent, configure them
@@ -100,7 +97,7 @@ source code.
 
 ## Start the application
 
-From `F:\kale\PCVP`, with the virtual environment active:
+From `file location`, with the virtual environment active:
 
 ```powershell
 python -m uvicorn backend.main:app --host 127.0.0.1 --port 8787 --reload
@@ -139,8 +136,7 @@ The response should include `"status": "ok"`.
 4. Wait for Nmap, its `vuln` NSE checks, and (for web targets) Gobuster to
    complete. NSE checks can take longer than a basic port scan.
 5. Review **Overview**, **Services**, **Attack Graph**, and **Web Scan**.
-6. Open **Details** for remediation and use **Download PDF** when the scan is
-   complete.
+6. Open **Details** for service evidence, risk reasons, and mapped CVEs.
 
 For a specific port, enter it as part of the target, such as
 `192.168.1.10:8080`. CIDR targets such as `192.168.1.0/24` use Angry IP
@@ -173,15 +169,6 @@ Choose a profile before starting a scan:
 - **Web assessment**: standard discovery plus HTTP/TLS and Gobuster checks.
 - **Full lab assessment**: all available network and web checks.
 
-The **Findings** tab converts raw scanner output into prioritized findings with
-severity, confidence, affected asset, evidence, source, and remediation. Use
-**Download CSV** for spreadsheet analysis; the PDF report includes the same
-evidence-based findings section.
-
-The **Scan History** tab keeps completed and in-progress scan metadata across
-server restarts. Select **View results** to reload a previous scan's services,
-findings, asset inventory, web results, and attack graph. The **Clear saved
-scans** button removes the saved history metadata.
 
 ## Stop and restart
 
@@ -216,7 +203,3 @@ Ignore or remove that environment and use the fresh `.venv` created above.
 NVD lookups require internet access and work best when Nmap identifies a
 product and version. Set `NVD_API_KEY` if the public NVD rate limit is reached.
 
-### Remediation says `GEMINI_API_KEY not set`
-
-Set `GEMINI_API_KEY` in the same PowerShell window before starting Uvicorn,
-then restart the server.

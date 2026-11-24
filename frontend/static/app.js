@@ -33,7 +33,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (resp.ok) {
         currentScanId = saved;
         statusDiv.textContent = `Restored last scan: ${currentScanId}`;
-        updateHeaderScanInfo();
 
         const cachedHtml = localStorage.getItem("pcvp:lastServicesHtml");
         const cachedStats = localStorage.getItem("pcvp:lastStats");
@@ -148,8 +147,6 @@ if (cachedGraph) {
           pollScanStatus(currentScanId);
         } else {
           statusDiv.textContent = `Restored last scan: ${currentScanId}`;
-          const reportBtn = document.getElementById("download-report-btn");
-          if (reportBtn) reportBtn.disabled = false;
         }
       } else {
         localStorage.removeItem("pcvp:lastScanId");
@@ -160,7 +157,6 @@ if (cachedGraph) {
         localStorage.removeItem("pcvp:lastGraphText");
         resetOverview();
         setTableLoadingStates();
-        updateHeaderScanInfo();
         statusDiv.textContent = "";
       }
     } catch (e) {
@@ -171,7 +167,6 @@ if (cachedGraph) {
       localStorage.removeItem("pcvp:lastGraphText");
       resetOverview();
       setTableLoadingStates();
-      updateHeaderScanInfo();
       statusDiv.textContent = "";
     }
   }
@@ -188,17 +183,9 @@ if (cachedGraph) {
     if (e.target === modal) modal.style.display = "none";
   });
 
-  const clearBtn = document.getElementById("clear-scans-btn");
   await loadScanHistory();
   const refreshHistoryBtn = document.getElementById("refresh-history-btn");
   if (refreshHistoryBtn) refreshHistoryBtn.addEventListener("click", loadScanHistory);
-  const scanHistoryBtn = document.getElementById("scan-history-btn");
-  if (scanHistoryBtn) {
-    scanHistoryBtn.addEventListener("click", () => {
-      showTab("tab-history");
-      loadScanHistory();
-    });
-  }
   const historyBody = document.querySelector("#history-table tbody");
   if (historyBody) {
     historyBody.addEventListener("click", (event) => {
@@ -212,39 +199,6 @@ if (cachedGraph) {
       if (currentScanId) window.location.href = `/scan/${currentScanId}/findings.csv`;
     });
   }
-  if (clearBtn) {
-    clearBtn.addEventListener("click", async () => {
-      if (!confirm("Clear persisted scan metadata from the server and local cache?")) return;
-      try {
-        const resp = await fetch("/scans/clear", { method: "POST" });
-        if (!resp.ok) {
-          const data = await resp.json().catch(() => ({}));
-          alert(`Failed to clear persisted scans: ${data.detail || resp.status}`);
-          return;
-        }
-
-        localStorage.removeItem("pcvp:lastScanId");
-        localStorage.removeItem("pcvp:lastServicesHtml");
-        localStorage.removeItem("pcvp:lastStats");
-        localStorage.removeItem("pcvp:lastServices");
-        localStorage.removeItem("pcvp:lastTarget");
-        localStorage.removeItem("pcvp:lastExposure");
-        localStorage.removeItem("pcvp:bootId");
-        localStorage.removeItem("pcvp:lastGobusterHtml");
-        localStorage.removeItem("pcvp:lastGraphText");
-        currentScanId = null;
-        resetOverview();
-        setTableLoadingStates();
-        updateHeaderScanInfo();
-        document.getElementById("scan-status").textContent = "Cleared persisted scans.";
-        await loadScanHistory();
-      } catch (err) {
-        console.error(err);
-        alert("Error clearing persisted scans (see console)");
-      }
-    });
-  }
-
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     // ✅ Clear cached UI from previous scan
@@ -254,12 +208,6 @@ if (cachedGraph) {
     localStorage.removeItem("pcvp:lastGobusterHtml");
     localStorage.removeItem("pcvp:lastGraphText");
 
-    // ✅ Clear remediation cache for old scan
-    for (const key of Object.keys(localStorage)) {
-      if (key.startsWith("pcvp:remediation:")) {
-        localStorage.removeItem(key);
-      }
-    }
     const target = document.getElementById("target").value.trim();
     const exposure = document.getElementById("exposure").value;
     const profile = document.getElementById("profile").value;
@@ -277,8 +225,6 @@ if (cachedGraph) {
     resetOverview();
     setTableLoadingStates();
 
-    const reportBtn = document.getElementById("download-report-btn");
-    if (reportBtn) reportBtn.disabled = true;
 
     startBtn.disabled = true;
     statusDiv.textContent = "Starting scan...";
@@ -302,7 +248,6 @@ if (cachedGraph) {
       localStorage.setItem("pcvp:lastScanId", currentScanId);
       localStorage.setItem("pcvp:lastTarget", target);
       localStorage.setItem("pcvp:lastExposure", currentExposure);
-      updateHeaderScanInfo();
       statusDiv.textContent = `Scan started (ID: ${currentScanId}). Waiting for completion...`;
       pollScanStatus(currentScanId);
       await loadScanHistory();
@@ -405,7 +350,6 @@ async function restoreHistoricalScan(scanId) {
   currentScanId = scan.scan_id;
   currentExposure = scan.exposure || scan.exposure_effective || "auto";
   localStorage.setItem("pcvp:lastScanId", currentScanId);
-  updateHeaderScanInfo();
   document.getElementById("scan-status").textContent = `Viewing scan ${scan.scan_id}`;
   document.getElementById("profile").value = scan.profile || "standard";
   resetOverview();
@@ -419,7 +363,6 @@ async function restoreHistoricalScan(scanId) {
       loadWebAssessment(scan.scan_id),
       loadAttackGraph(scan.scan_id),
     ]);
-    document.getElementById("download-report-btn").disabled = false;
   } else {
     pollScanStatus(scan.scan_id);
   }
@@ -436,27 +379,9 @@ function setTableLoadingStates() {
   agNet.innerHTML = "";
 }
 
-function updateHeaderScanInfo() {
-  const el = document.getElementById("header-scan-info");
-  if (!currentScanId) { el.innerHTML = ""; return; }
-  const badgeClass =
-    currentExposure === "external" ? "badge-external" :
-    currentExposure === "internal" ? "badge-internal" : "badge-auto";
-  el.innerHTML = `
-    <div style="text-align:right;">
-      <div style="font-size:0.75rem; color:#9ca3af;">Current Scan ID</div>
-      <div style="font-size:0.85rem;">${currentScanId}</div>
-      <div style="margin-top:4px;">
-        <span class="badge ${badgeClass}">${currentExposure || "auto"}</span>
-      </div>
-    </div>
-  `;
-}
-
 function pollScanStatus(scanId) {
   const statusDiv = document.getElementById("scan-status");
   const startBtn = document.getElementById("start-scan-btn");
-  const reportBtn = document.getElementById("download-report-btn");
 
   const doPoll = async () => {
     try {
@@ -466,20 +391,17 @@ function pollScanStatus(scanId) {
         clearInterval(statusIntervalId);
         statusIntervalId = null;
         startBtn.disabled = false;
-        if (reportBtn) reportBtn.disabled = true;
         return;
       }
 
       const data = await resp.json();
       currentExposure = data.exposure || currentExposure;
-      updateHeaderScanInfo();
 
       if (data.status === "completed") {
         // ✅ Fully done — stop polling and load everything
         clearInterval(statusIntervalId);
         statusIntervalId = null;
         startBtn.disabled = false;
-        if (reportBtn) reportBtn.disabled = false;
 
         statusDiv.textContent = `Loading results...`;
 
@@ -521,7 +443,6 @@ function pollScanStatus(scanId) {
         clearInterval(statusIntervalId);
         statusIntervalId = null;
         startBtn.disabled = false;
-        if (reportBtn) reportBtn.disabled = true;
         statusDiv.textContent = `Scan failed: ${data.message || "unknown error"}`;
 
       } else if (data.status === "nmap_done") {
@@ -545,7 +466,6 @@ function pollScanStatus(scanId) {
       clearInterval(statusIntervalId);
       statusIntervalId = null;
       startBtn.disabled = false;
-      if (reportBtn) reportBtn.disabled = true;
     }
   };
 
@@ -896,52 +816,6 @@ localStorage.setItem("pcvp:lastGraphText", textContainer.innerHTML || textContai
   }
 }
 
-async function loadLLMRemediation(scanId, svc) {
-  const el = document.getElementById("llm-remediation");
-  if (!el) return;
-
-  // ✅ Check cache first
-  const cacheKey = `pcvp:remediation:${scanId}:${svc.ip}:${svc.port}:${svc.protocol || "tcp"}`;
-  const cached = localStorage.getItem(cacheKey);
-  if (cached) {
-    el.innerHTML = cached;
-    return;
-  }
-
-  el.innerHTML = `<div style="color:#9ca3af;">Generating remediation...</div>`;
-
-  try {
-    const resp = await fetch(`/scan/${scanId}/remediation`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scan_id: scanId, ip: svc.ip, port: svc.port, protocol: svc.protocol || "tcp" }),
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      el.innerHTML = `<div style="color:#fca5a5;">Failed: ${escapeHtml(data.detail || `HTTP ${resp.status}`)}</div>`;
-      return;
-    }
-    const r = data.remediation || {};
-    const steps = Array.isArray(r.steps) ? r.steps : [];
-    const verification = Array.isArray(r.verification) ? r.verification : [];
-    const refs = Array.isArray(r.references) ? r.references : [];
-
-    const html = `
-      <div><strong>Summary:</strong> ${escapeHtml(r.summary || "")}</div>
-      <div><strong>Priority:</strong> ${escapeHtml(r.priority || "")}</div>
-      ${steps.length ? `<div class="section-title">Recommended Steps</div><ul>${steps.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>` : `<div style="color:#9ca3af; margin-top:6px;">No steps returned.</div>`}
-      ${verification.length ? `<div class="section-title">Verification</div><ul>${verification.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>` : ""}
-      ${refs.length ? `<div class="section-title">References</div><ul>${refs.map((s) => `<li>${escapeHtml(s)}</li>`).join("")}</ul>` : ""}
-    `;
-
-    el.innerHTML = html;
-    // ✅ Save to cache
-    localStorage.setItem(cacheKey, html);
-  } catch (err) {
-    console.error(err);
-    el.innerHTML = `<div style="color:#fca5a5;">Error generating remediation (see console).</div>`;
-  }
-}
 function onDetailsClick(e) {
   const ip = e.target.getAttribute("data-ip");
   const port = parseInt(e.target.getAttribute("data-port"), 10);
@@ -990,18 +864,10 @@ function onDetailsClick(e) {
   } else {
     html += "<div>No NSE vulnerability evidence reported for this service.</div>";
   }
-  html += `<div class="section-title">Remediation</div>`;
-  html += `<div id="llm-remediation" style="margin-top:6px; color:#9ca3af;">Not generated yet.</div>`;
   body.innerHTML = html;
   modal.style.display = "flex";
-  if (currentScanId) loadLLMRemediation(currentScanId, svc);
 }
 
 function escapeHtml(str) {
   return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function downloadReport() {
-  if (!currentScanId) { alert("Run a scan first, then download the report."); return; }
-  window.location.href = `/scan/${currentScanId}/report.pdf`;
 }
